@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import type { GenerateBlueprintInput, SchemaBlueprintSummary } from "@dhis-sync/contracts";
+import type { GenerateBlueprintInput, SchemaBlueprintSummary, UpdateBlueprintInput } from "@dhis-sync/contracts";
 import { MetadataService } from "../metadata/metadata.service.js";
 import { generateColumns, tableNameFor } from "./schema-generator.js";
 import { SchemaRepository } from "./schema.repository.js";
@@ -32,6 +32,16 @@ export class SchemaService {
     if (!existing) throw new NotFoundException("Schema blueprint not found");
     if (existing.status === "retired") throw new BadRequestException("A retired blueprint cannot be applied");
     return this.repository.apply(id);
+  }
+
+  async update(id: string, input: UpdateBlueprintInput): Promise<SchemaBlueprintSummary> {
+    const existing = await this.repository.findById(id);
+    if (!existing) throw new NotFoundException("Schema blueprint not found");
+    const existingNames = new Set(existing.columns.map((column) => column.columnName));
+    if (input.columns.some((column) => !existingNames.has(column.columnName))) {
+      throw new BadRequestException("The update contains a column that does not belong to this blueprint");
+    }
+    return this.repository.updateColumns(id, input.columns);
   }
 
   async dropTable(

@@ -1,5 +1,5 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
-import { CreateConnectionSchema, type CreateConnectionInput } from "@dhis-sync/contracts";
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
+import { CreateConnectionSchema, type CreateConnectionInput, UpdateConnectionSchema, type UpdateConnectionInput } from "@dhis-sync/contracts";
 import { ConnectionService } from "./connection.service.js";
 
 function parseConnection(body: unknown): CreateConnectionInput {
@@ -9,6 +9,12 @@ function parseConnection(body: unknown): CreateConnectionInput {
       parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`)
     );
   }
+  return parsed.data;
+}
+
+function parseUpdate(body: unknown): UpdateConnectionInput {
+  const parsed = UpdateConnectionSchema.safeParse(body);
+  if (!parsed.success) throw new BadRequestException(parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`));
   return parsed.data;
 }
 
@@ -30,6 +36,11 @@ export class ConnectionController {
   @Post()
   create(@Body() body: unknown) {
     return this.connections.create(parseConnection(body));
+  }
+
+  @Put(":id")
+  update(@Param("id", new ParseUUIDPipe()) id: string, @Body() body: unknown) {
+    return this.connections.update(id, parseUpdate(body));
   }
 
   @Post(":id/test")

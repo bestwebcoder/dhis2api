@@ -2,7 +2,8 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import {
   type ConnectionSummary,
   type ConnectionTestResult,
-  type CreateConnectionInput
+  type CreateConnectionInput,
+  type UpdateConnectionInput
 } from "@dhis-sync/contracts";
 import {
   Dhis2Client,
@@ -119,6 +120,36 @@ export class ConnectionService {
       throw error;
     }
     return publicSummary(stored);
+  }
+
+  async update(id: string, input: UpdateConnectionInput): Promise<ConnectionSummary> {
+    const existing = await this.repository.findById(id);
+    if (!existing) throw new NotFoundException("Connection not found");
+    const duplicate = await this.repository.findByName(input.name);
+    if (duplicate && duplicate.id !== id) throw new ConflictException(`A connection named "${duplicate.name}" already exists`);
+
+    let credential: StoredCredential;
+    const supplied = input.authType === "pat"
+      ? Boolean(input.apiToken?.trim())
+      : Boolean(input.username?.trim() && input.password);
+    if (supplied) {
+      credential = this.credentialFromInput({ ...input, testBeforeSave: true } as CreateConnectionInput);
+    } else {
+      if (input.authType !== existing.authType) throw new BadRequestException("Enter new credentials when changing the authentication type");
+      credential = this.cipher.decrypt<StoredCredential>({ ciphertext: existing.ciphertext, iv: existing.iv, tag: existing.tag });
+    }
+    const baseUrl = normalizeDhis2BaseUrl(input.baseUrl);
+    const test = input.testAfterSave ? await this.runConnectionTest(baseUrl, credential) : null;
+    try {
+      return publicSummary(await this.repository.update({
+        id, name: input.name.trim(), role: input.role, baseUrl, authType: input.authType,
+        encryptedSecret: this.cipher.encrypt(credential), test, isActive: input.isActive
+      }));
+    } catch (error) {
+      const databaseError = error as { code?: string };
+      if (databaseError.code === "23505") throw new ConflictException(`A connection named "${input.name.trim()}" already exists`);
+      throw error;
+    }
   }
 
   async testSaved(id: string): Promise<ConnectionSummary> {

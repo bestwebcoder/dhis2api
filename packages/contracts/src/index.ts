@@ -24,6 +24,19 @@ export const CreateConnectionSchema = z
   });
 
 export type CreateConnectionInput = z.infer<typeof CreateConnectionSchema>;
+
+export const UpdateConnectionSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  role: ConnectionRoleSchema,
+  baseUrl: z.url({ protocol: /^https?$/ }),
+  authType: AuthTypeSchema,
+  apiToken: z.string().optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  isActive: z.boolean().default(true),
+  testAfterSave: z.boolean().default(true)
+});
+export type UpdateConnectionInput = z.infer<typeof UpdateConnectionSchema>;
 export type ConnectionRole = z.infer<typeof ConnectionRoleSchema>;
 export type AuthType = z.infer<typeof AuthTypeSchema>;
 
@@ -153,6 +166,15 @@ export interface SchemaBlueprintSummary {
   appliedAt: string | null;
 }
 
+export const UpdateBlueprintSchema = z.object({
+  columns: z.array(z.object({
+    columnName: z.string().trim().min(1).max(63),
+    label: z.string().trim().min(1).max(240),
+    isFilterable: z.boolean()
+  })).min(1)
+});
+export type UpdateBlueprintInput = z.infer<typeof UpdateBlueprintSchema>;
+
 export interface BackupAvailability {
   blueprintId: string;
   years: number[];
@@ -167,6 +189,11 @@ export const CreateSyncDefinitionSchema = z.object({
   filters: z.record(z.string(), z.unknown()).default({})
 });
 export type CreateSyncDefinitionInput = z.infer<typeof CreateSyncDefinitionSchema>;
+
+export const UpdateSyncDefinitionSchema = CreateSyncDefinitionSchema.omit({ filters: true }).extend({
+  isActive: z.boolean().default(true)
+});
+export type UpdateSyncDefinitionInput = z.infer<typeof UpdateSyncDefinitionSchema>;
 
 export const UpsertScheduleSchema = z.object({
   intervalMinutes: z.number().int().min(1).max(525600),

@@ -14,6 +14,8 @@ export function SchemaBuilder() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [columnEdits, setColumnEdits] = useState<Record<string, { label: string; isFilterable: boolean }>>({});
 
   async function load() {
     try {
@@ -80,6 +82,23 @@ export function SchemaBuilder() {
     finally { setBusy(""); }
   }
 
+  function startEdit(item: SchemaBlueprintSummary) {
+    setColumnEdits(Object.fromEntries(item.columns.map((column) => [column.columnName, { label: column.label, isFilterable: column.isFilterable }])));
+    setEditing(true); setError(null); setNotice(null);
+  }
+
+  async function saveEdits(item: SchemaBlueprintSummary) {
+    setBusy(`edit-${item.id}`); setError(null); setNotice(null);
+    try {
+      const updated = await schemaApi.update(item.id, {
+        columns: item.columns.map((column) => ({ columnName: column.columnName, ...(columnEdits[column.columnName] ?? { label: column.label, isFilterable: column.isFilterable }) }))
+      });
+      setBlueprints((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
+      setSelected(updated); setEditing(false); setNotice(`Display labels and filters for ${updated.resourceName} were updated.`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not update schema"); }
+    finally { setBusy(""); }
+  }
+
   const selectedResource = useMemo(() => resources.find((item) => item.id === resourceUid), [resources, resourceUid]);
 
   return <main className="content" id="main-content">
@@ -95,9 +114,9 @@ export function SchemaBuilder() {
       </div><div className="form-actions"><button className="button button--primary" disabled={!resourceUid || Boolean(busy)}>{busy === "generate" ? "Discovering and generating…" : "Generate blueprint"}</button></div></form>
     </section>
     <section className="panel"><div className="panel-heading"><div><p className="step">Blueprint registry</p><h2>Generated schemas</h2></div><button className="text-button" onClick={() => void load()}>Refresh</button></div>
-      {blueprints.length === 0 ? <div className="empty"><div className="empty-icon">▦</div><h3>No schemas generated</h3><p>Select a DHIS2 resource above to start.</p></div> : <div className="split-view"><div className="schema-list">{blueprints.map((item) => <button className={selected?.id === item.id ? "schema-item selected" : "schema-item"} onClick={() => setSelected(item)} key={item.id}><span><strong>{item.resourceName}</strong><small>{item.schemaName}.{item.tableName}</small></span><span className={`pill pill--${item.status}`}>{item.status}</span></button>)}</div>
-      {selected && <div className="schema-preview"><div className="preview-head"><div><h3>{selected.resourceName}</h3><p>{selected.columns.length} columns · v{selected.version} · {selected.strategy.replaceAll("_", " ")}</p></div><div className="row-actions">{selected.status === "draft" && <button className="button button--primary" disabled={busy === selected.id} onClick={() => void applySchema(selected)}>Apply table</button>}{selected.status === "applied" && <button className="button button--danger" disabled={busy === selected.id} onClick={() => void dropSchema(selected)}>Drop table</button>}{selected.status !== "applied" && <button className="button button--danger" disabled={busy === selected.id} onClick={() => void deleteBlueprint(selected)}>Delete blueprint</button>}</div></div>
-        <div className="column-list"><table><thead><tr><th>#</th><th>DHIS2 field name</th><th>Type</th><th>Filter</th></tr></thead><tbody>{selected.columns.filter((column) => typeof column.mapping.displayColumnName !== "string").map((column) => <tr key={column.columnName}><td>{column.ordinal}</td><td>{column.label}</td><td><span className="role">{column.sqlType}</span></td><td>{column.isFilterable ? "Yes" : ""}</td></tr>)}</tbody></table></div>
+      {blueprints.length === 0 ? <div className="empty"><div className="empty-icon">▦</div><h3>No schemas generated</h3><p>Select a DHIS2 resource above to start.</p></div> : <div className="split-view"><div className="schema-list">{blueprints.map((item) => <button className={selected?.id === item.id ? "schema-item selected" : "schema-item"} onClick={() => { setSelected(item); setEditing(false); }} key={item.id}><span><strong>{item.resourceName}</strong><small>{item.schemaName}.{item.tableName}</small></span><span className={`pill pill--${item.status}`}>{item.status}</span></button>)}</div>
+      {selected && <div className="schema-preview"><div className="preview-head"><div><h3>{selected.resourceName}</h3><p>{selected.columns.length} columns · v{selected.version} · {selected.strategy.replaceAll("_", " ")}</p></div><div className="row-actions">{editing ? <><button className="button button--quiet" disabled={Boolean(busy)} onClick={() => setEditing(false)}>Cancel</button><button className="button button--primary" disabled={Boolean(busy)} onClick={() => void saveEdits(selected)}>{busy === `edit-${selected.id}` ? "Saving…" : "Save labels"}</button></> : <button className="button button--quiet" disabled={Boolean(busy)} onClick={() => startEdit(selected)}>Edit</button>}{!editing && selected.status === "draft" && <button className="button button--primary" disabled={busy === selected.id} onClick={() => void applySchema(selected)}>Apply table</button>}{!editing && selected.status === "applied" && <button className="button button--danger" disabled={busy === selected.id} onClick={() => void dropSchema(selected)}>Drop table</button>}{!editing && selected.status !== "applied" && <button className="button button--danger" disabled={busy === selected.id} onClick={() => void deleteBlueprint(selected)}>Delete blueprint</button>}</div></div>
+        <div className="column-list"><table><thead><tr><th>#</th><th>DHIS2 field name</th><th>Type</th><th>Filter</th></tr></thead><tbody>{selected.columns.filter((column) => typeof column.mapping.displayColumnName !== "string").map((column) => <tr key={column.columnName}><td>{column.ordinal}</td><td>{editing ? <input aria-label={`Label for ${column.columnName}`} value={columnEdits[column.columnName]?.label ?? column.label} onChange={(event) => setColumnEdits((current) => ({ ...current, [column.columnName]: { ...(current[column.columnName] ?? { label: column.label, isFilterable: column.isFilterable }), label: event.target.value } }))} /> : column.label}<small><code>{column.columnName}</code></small></td><td><span className="role">{column.sqlType}</span></td><td>{editing ? <input className="compact-checkbox" type="checkbox" aria-label={`Filterable ${column.label}`} checked={columnEdits[column.columnName]?.isFilterable ?? column.isFilterable} onChange={(event) => setColumnEdits((current) => ({ ...current, [column.columnName]: { ...(current[column.columnName] ?? { label: column.label, isFilterable: column.isFilterable }), isFilterable: event.target.checked } }))} /> : column.isFilterable ? "Yes" : ""}</td></tr>)}</tbody></table></div>
         <details className="sql-preview"><summary>SQL preview</summary><pre>{selected.sqlPreview}</pre></details>
       </div>}</div>}
     </section>

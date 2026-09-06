@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { BackupAvailability, ReportDefinitionSummary } from "@dhis-sync/contracts";
 import { API_URL, backupApi, reportApi, schemaApi } from "./api.js";
 
-export function Backups() {
+export function Backups({ navigate }: { navigate: (page: string) => void }) {
   const [reports, setReports] = useState<ReportDefinitionSummary[]>([]);
   const [availability, setAvailability] = useState<Record<string, BackupAvailability>>({});
   const [selectedYears, setSelectedYears] = useState<Record<string, string>>({});
@@ -99,6 +99,7 @@ export function Backups() {
                 {years.map((year) => <option value={year} key={year}>{year}</option>)}
               </select></td>
               <td><div className="row-actions row-actions--wrap">
+                <button className="text-button" disabled={itemBusy} onClick={() => navigate("schema")}>Edit schema</button>
                 <button className="text-button" disabled={itemBusy} onClick={() => void download(item, "json")}>{busy === `download-${item.blueprintId}-json` ? "Downloading…" : "Download JSON"}</button>
                 <button className="text-button" disabled={itemBusy} onClick={() => void download(item, "csv")}>{busy === `download-${item.blueprintId}-csv` ? "Downloading…" : "Download CSV"}</button>
                 <button className="text-button text-button--danger" disabled={itemBusy} onClick={() => void drop(item)}>{busy === `drop-${item.blueprintId}` ? "Dropping…" : "Drop table"}</button>

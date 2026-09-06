@@ -40,6 +40,8 @@ export interface InsertConnection {
   test: ConnectionTestResult | null;
 }
 
+export interface UpdateConnection extends InsertConnection { id: string; isActive: boolean; }
+
 const columns = `
   id, name, role, base_url, auth_type, encrypted_secret, secret_iv, secret_tag,
   dhis2_version, system_name, capabilities, last_test_status, last_test_message,
@@ -122,6 +124,25 @@ export class ConnectionRepository {
     );
     const row = result.rows[0];
     if (!row) throw new Error("Connection insert returned no row");
+    return mapRow(row);
+  }
+
+  async update(input: UpdateConnection): Promise<StoredConnection> {
+    const test = input.test;
+    const result = await this.database.query<ConnectionRow>(
+      `UPDATE dhis2_connections SET name=$2, role=$3, base_url=$4, auth_type=$5,
+       encrypted_secret=$6, secret_iv=$7, secret_tag=$8, is_active=$9,
+       dhis2_version=$10, system_name=$11, current_user_summary=$12, capabilities=$13,
+       last_test_status=$14, last_test_message=$15, last_tested_at=$16, updated_at=now()
+       WHERE id=$1 RETURNING ${columns}`,
+      [input.id, input.name, input.role, input.baseUrl, input.authType,
+       input.encryptedSecret.ciphertext, input.encryptedSecret.iv, input.encryptedSecret.tag, input.isActive,
+       test?.dhis2Version ?? null, test?.systemName ?? null,
+       test?.currentUser ? JSON.stringify(test.currentUser) : null, JSON.stringify(test?.capabilities ?? {}),
+       test ? "healthy" : "untested", test?.message ?? null, test?.testedAt ?? null]
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Connection not found");
     return mapRow(row);
   }
 

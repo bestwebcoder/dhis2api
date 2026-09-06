@@ -53,6 +53,8 @@ export function ConnectionManager() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
+  const [editing, setEditing] = useState<ConnectionSummary | null>(null);
+  const [connectionActive, setConnectionActive] = useState(true);
 
   const healthyCount = useMemo(
     () => connections.filter((item) => item.lastTestStatus === "healthy").length,
@@ -93,7 +95,7 @@ export function ConnectionManager() {
   async function save(event: FormEvent) {
     event.preventDefault();
     const duplicate = connections.find(
-      (connection) => connection.name.trim().toLowerCase() === form.name.trim().toLowerCase()
+      (connection) => connection.id !== editing?.id && connection.name.trim().toLowerCase() === form.name.trim().toLowerCase()
     );
     if (duplicate) {
       setNotice(null);
@@ -104,17 +106,37 @@ export function ConnectionManager() {
     setError(null);
     setNotice(null);
     try {
-      const created = await connectionApi.create(form);
-      setConnections((current) => [created, ...current]);
+      const saved = editing
+        ? await connectionApi.update(editing.id, { ...form, isActive: connectionActive, testAfterSave: true })
+        : await connectionApi.create(form);
+      setConnections((current) => editing
+        ? current.map((item) => item.id === saved.id ? saved : item)
+        : [saved, ...current]);
       setForm(emptyForm);
       setTestResult(null);
       setShowForm(false);
-      setNotice(`Connection "${created.name}" was saved successfully.`);
+      setEditing(null);
+      setNotice(`Connection "${saved.name}" was ${editing ? "updated" : "saved"} successfully.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save connection");
     } finally {
       setBusy(null);
     }
+  }
+
+  function startEdit(connection: ConnectionSummary) {
+    setEditing(connection);
+    setConnectionActive(connection.isActive);
+    setForm({
+      name: connection.name, role: connection.role, baseUrl: connection.baseUrl,
+      authType: connection.authType, apiToken: "", username: "", password: "", testBeforeSave: true
+    });
+    setTestResult(null); setError(null); setNotice(null); setShowForm(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function closeForm() {
+    setEditing(null); setConnectionActive(true); setForm(emptyForm); setTestResult(null); setShowForm(false);
   }
 
   async function retest(id: string) {
@@ -152,7 +174,7 @@ export function ConnectionManager() {
           <h1>DHIS2 connections</h1>
           <p className="lede">Securely connect source and destination instances, then verify their API capabilities.</p>
         </div>
-        <button className="button button--primary" onClick={() => setShowForm((current) => !current)}>
+        <button className="button button--primary" onClick={() => showForm ? closeForm() : setShowForm(true)}>
           <span aria-hidden="true">＋</span> {showForm ? "Close form" : "New connection"}
         </button>
       </header>
@@ -168,7 +190,7 @@ export function ConnectionManager() {
 
       {showForm && (
         <section className="panel form-panel">
-          <div className="panel-heading"><div><p className="step">Endpoint details</p><h2>Add a DHIS2 instance</h2></div><span className="secure-note">Credentials are encrypted at rest</span></div>
+          <div className="panel-heading"><div><p className="step">Endpoint details</p><h2>{editing ? `Edit ${editing.name}` : "Add a DHIS2 instance"}</h2></div><span className="secure-note">Credentials are encrypted at rest</span></div>
           <form onSubmit={save}>
             <div className="form-grid">
               <label><span>Connection name</span><input required minLength={2} value={form.name} onChange={(e) => update("name", e.target.value)} placeholder="National HMIS production" /></label>
@@ -176,10 +198,11 @@ export function ConnectionManager() {
               <label className="span-2"><span>DHIS2 server URL</span><input required type="url" value={form.baseUrl} onChange={(e) => update("baseUrl", e.target.value)} placeholder="https://play.dhis2.org/40.2.0" /><small>You may paste an instance URL or a URL ending in /api or /api/40.</small></label>
               <label><span>Authentication</span><select value={form.authType} onChange={(e) => update("authType", e.target.value as AuthType)}><option value="pat">Personal access token</option><option value="basic">Username and password</option></select></label>
               {form.authType === "pat" ? (
-                <label><span>API token</span><input required type="password" autoComplete="off" value={form.apiToken ?? ""} onChange={(e) => update("apiToken", e.target.value)} placeholder="Paste token" /></label>
+                <label><span>API token</span><input required={!editing} type="password" autoComplete="off" value={form.apiToken ?? ""} onChange={(e) => update("apiToken", e.target.value)} placeholder={editing ? "Leave blank to keep current token" : "Paste token"} /></label>
               ) : (
-                <><label><span>Username</span><input required autoComplete="username" value={form.username ?? ""} onChange={(e) => update("username", e.target.value)} /></label><label><span>Password</span><input required type="password" autoComplete="current-password" value={form.password ?? ""} onChange={(e) => update("password", e.target.value)} /></label></>
+                <><label><span>Username</span><input required={!editing} autoComplete="username" value={form.username ?? ""} onChange={(e) => update("username", e.target.value)} placeholder={editing ? "Leave both blank to keep credentials" : ""} /></label><label><span>Password</span><input required={!editing} type="password" autoComplete="current-password" value={form.password ?? ""} onChange={(e) => update("password", e.target.value)} placeholder={editing ? "Leave both blank to keep credentials" : ""} /></label></>
               )}
+              {editing && <label className="checkbox-label span-2"><input type="checkbox" checked={connectionActive} onChange={(event) => setConnectionActive(event.target.checked)} /><span>Connection is active</span></label>}
             </div>
             {testResult && (
               <div className="test-result" aria-live="polite">
@@ -187,7 +210,7 @@ export function ConnectionManager() {
                 <CapabilityList capabilities={testResult.capabilities} />
               </div>
             )}
-            <div className="form-actions"><button className="button button--quiet" type="button" disabled={Boolean(busy)} onClick={() => void runTest()}>{busy === "test" ? "Testing…" : "Test connection"}</button><button className="button button--primary" disabled={Boolean(busy)} type="submit">{busy === "save" ? "Saving…" : "Save connection"}</button></div>
+            <div className="form-actions">{editing && <button className="button button--quiet" type="button" disabled={Boolean(busy)} onClick={closeForm}>Cancel</button>}<button className="button button--quiet" type="button" disabled={Boolean(busy) || Boolean(editing && !form.apiToken && !form.password)} onClick={() => void runTest()}>{busy === "test" ? "Testing…" : editing && !form.apiToken && !form.password ? "Enter credentials to test" : "Test connection"}</button><button className="button button--primary" disabled={Boolean(busy)} type="submit">{busy === "save" ? "Saving…" : editing ? "Save changes" : "Save connection"}</button></div>
           </form>
         </section>
       )}
@@ -198,7 +221,7 @@ export function ConnectionManager() {
           <div className="empty"><div className="empty-icon">↔</div><h3>No endpoints configured</h3><p>Add the source DHIS2 instance to begin metadata discovery.</p><button className="button button--primary" onClick={() => setShowForm(true)}>Add first connection</button></div>
         ) : (
           <div className="table-wrap"><table><thead><tr><th>Instance</th><th>Role</th><th>Version</th><th>Capabilities</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{connections.map((connection) => (
-            <tr key={connection.id}><td><strong>{connection.name}</strong><small>{connection.baseUrl}</small></td><td><span className="role">{connection.role}</span></td><td>{connection.dhis2Version ?? "Unknown"}</td><td><CapabilityList capabilities={connection.capabilities} /></td><td><StatusBadge status={connection.lastTestStatus} /><small>{connection.lastTestedAt ? new Date(connection.lastTestedAt).toLocaleString() : "Not tested"}</small></td><td><div className="row-actions"><button className="text-button" disabled={busy === connection.id} onClick={() => void retest(connection.id)}>{busy === connection.id ? "Working…" : "Retest"}</button><button className="text-button text-button--danger" disabled={busy === connection.id} onClick={() => void deleteConnection(connection)}>Delete</button></div></td></tr>
+            <tr key={connection.id}><td><strong>{connection.name}</strong><small>{connection.baseUrl}</small></td><td><span className="role">{connection.role}</span></td><td>{connection.dhis2Version ?? "Unknown"}</td><td><CapabilityList capabilities={connection.capabilities} /></td><td><StatusBadge status={connection.lastTestStatus} /><small>{connection.lastTestedAt ? new Date(connection.lastTestedAt).toLocaleString() : "Not tested"}</small></td><td><div className="row-actions"><button className="text-button" disabled={busy === connection.id} onClick={() => startEdit(connection)}>Edit</button><button className="text-button" disabled={busy === connection.id} onClick={() => void retest(connection.id)}>{busy === connection.id ? "Working…" : "Retest"}</button><button className="text-button text-button--danger" disabled={busy === connection.id} onClick={() => void deleteConnection(connection)}>Delete</button></div></td></tr>
           ))}</tbody></table></div>
         )}
       </section>

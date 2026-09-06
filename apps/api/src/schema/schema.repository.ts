@@ -174,6 +174,21 @@ export class SchemaRepository {
     return applied;
   }
 
+  async updateColumns(id: string, columns: { columnName: string; label: string; isFilterable: boolean }[]): Promise<SchemaBlueprintSummary> {
+    await this.database.transaction(async (client) => {
+      for (const column of columns) {
+        await client.query(
+          `UPDATE schema_columns SET label=$3, is_filterable=$4 WHERE blueprint_id=$1 AND column_name=$2`,
+          [id, column.columnName, column.label.trim(), column.isFilterable]
+        );
+      }
+      await client.query(`UPDATE schema_blueprints SET updated_at=now() WHERE id=$1`, [id]);
+    });
+    const updated = await this.findById(id);
+    if (!updated) throw new Error("Updated blueprint could not be loaded");
+    return updated;
+  }
+
   async dropTable(id: string): Promise<{ deletedSyncDefinitions: number }> {
     const blueprint = await this.findById(id);
     if (!blueprint) throw new Error("Blueprint not found");

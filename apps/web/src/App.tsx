@@ -34,7 +34,7 @@ export function App() {
       {page === "schema" && <SchemaBuilder />}
       {page === "sync" && <SyncSchedules />}
       {page === "reports" && <Reports />}
-      {page === "backups" && <Backups />}
+      {page === "backups" && <Backups navigate={(target) => navigate(target as Page)} />}
     </div>
   </div>;
 }

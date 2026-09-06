@@ -1,9 +1,15 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
-import { GenerateBlueprintSchema, type GenerateBlueprintInput } from "@dhis-sync/contracts";
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
+import { GenerateBlueprintSchema, type GenerateBlueprintInput, UpdateBlueprintSchema, type UpdateBlueprintInput } from "@dhis-sync/contracts";
 import { SchemaService } from "./schema.service.js";
 
 function parseGenerate(body: unknown): GenerateBlueprintInput {
   const result = GenerateBlueprintSchema.safeParse(body);
+  if (!result.success) throw new BadRequestException(result.error.issues.map((issue) => issue.message));
+  return result.data;
+}
+
+function parseUpdate(body: unknown): UpdateBlueprintInput {
+  const result = UpdateBlueprintSchema.safeParse(body);
   if (!result.success) throw new BadRequestException(result.error.issues.map((issue) => issue.message));
   return result.data;
 }
@@ -26,6 +32,11 @@ export class SchemaController {
   @HttpCode(200)
   apply(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.schemas.apply(id);
+  }
+
+  @Put(":id")
+  update(@Param("id", new ParseUUIDPipe()) id: string, @Body() body: unknown) {
+    return this.schemas.update(id, parseUpdate(body));
   }
 
   @Delete(":id/table")

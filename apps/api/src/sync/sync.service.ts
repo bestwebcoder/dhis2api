@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import type { CreateSyncDefinitionInput, SyncDefinitionSummary, UpsertScheduleInput } from "@dhis-sync/contracts";
+import type { CreateSyncDefinitionInput, SyncDefinitionSummary, UpdateSyncDefinitionInput, UpsertScheduleInput } from "@dhis-sync/contracts";
 import type { PoolClient } from "pg";
 import { Dhis2HttpError } from "@dhis-sync/dhis2-client";
 import { ConnectionService } from "../connections/connection.service.js";
@@ -246,6 +246,13 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
   async create(input: CreateSyncDefinitionInput): Promise<SyncDefinitionSummary> {
     try { return await this.repository.create(input); }
     catch (error) { throw new BadRequestException(error instanceof Error ? error.message : "Could not create sync"); }
+  }
+
+  async update(id: string, input: UpdateSyncDefinitionInput): Promise<SyncDefinitionSummary> {
+    if (this.runningDefinitions.has(id)) throw new BadRequestException("Wait for the current run to finish before editing this sync");
+    if (!await this.repository.find(id)) throw new NotFoundException("Sync definition not found");
+    try { return await this.repository.updateDefinition(id, input); }
+    catch (error) { throw new BadRequestException(error instanceof Error ? error.message : "Could not update sync"); }
   }
 
   async schedule(id: string, input: UpsertScheduleInput): Promise<SyncDefinitionSummary> {

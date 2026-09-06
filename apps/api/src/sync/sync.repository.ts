@@ -4,6 +4,7 @@ import type {
   SyncDefinitionSummary,
   SyncRunSummary,
   SyncScheduleSummary,
+  UpdateSyncDefinitionInput,
   UpsertScheduleInput
 } from "@dhis-sync/contracts";
 import { DatabaseService } from "../database/database.service.js";
@@ -141,6 +142,21 @@ export class SyncRepository {
     const created = (await this.list()).find((item) => item.id === id);
     if (!created) throw new Error("Created sync could not be loaded");
     return created;
+  }
+
+  async updateDefinition(id: string, input: UpdateSyncDefinitionInput): Promise<SyncDefinitionSummary> {
+    const result = await this.database.query(
+      `UPDATE sync_definitions d SET name=$2, source_connection_id=$3, blueprint_id=b.id,
+       resource_type=CASE WHEN s.resource_type='program' THEN 'tracker' ELSE 'aggregate' END,
+       resource_uid=s.resource_uid, conflict_policy=$5, batch_size=$6, is_active=$7, updated_at=now()
+       FROM schema_blueprints b JOIN metadata_snapshots s ON s.id=b.snapshot_id
+       WHERE d.id=$1 AND b.id=$4 AND b.status='applied'`,
+      [id, input.name, input.sourceConnectionId, input.blueprintId, input.conflictPolicy, input.batchSize, input.isActive]
+    );
+    if (!result.rowCount) throw new Error("Sync or applied blueprint not found");
+    const updated = (await this.list()).find((item) => item.id === id);
+    if (!updated) throw new Error("Updated sync could not be loaded");
+    return updated;
   }
 
   async upsertSchedule(definitionId: string, input: UpsertScheduleInput): Promise<SyncDefinitionSummary> {

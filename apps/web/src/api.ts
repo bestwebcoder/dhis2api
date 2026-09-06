@@ -11,6 +11,9 @@ import type {
   ResourceType,
   SchemaBlueprintSummary,
   SyncDefinitionSummary,
+  UpdateBlueprintInput,
+  UpdateConnectionInput,
+  UpdateSyncDefinitionInput,
   UpsertScheduleInput
 } from "@dhis-sync/contracts";
 
@@ -93,6 +96,9 @@ export const connectionApi = {
     method: "POST",
     body: JSON.stringify(connectionPayload(input))
   }),
+  update: (id: string, input: UpdateConnectionInput) => request<ConnectionSummary>(`/connections/${id}`, {
+    method: "PUT", body: JSON.stringify(input)
+  }),
   testSaved: (id: string) => request<ConnectionSummary>(`/connections/${id}/test`, { method: "POST" }),
   delete: (id: string, name: string) => request<{ deleted: true }>(`/connections/${id}?confirm=${encodeURIComponent(name)}`, { method: "DELETE" })
 };
@@ -104,6 +110,7 @@ export const schemaApi = {
   generate: (input: GenerateBlueprintInput) => request<SchemaBlueprintSummary>("/schema-blueprints", {
     method: "POST", body: JSON.stringify(input)
   }),
+  update: (id: string, input: UpdateBlueprintInput) => request<SchemaBlueprintSummary>(`/schema-blueprints/${id}`, { method: "PUT", body: JSON.stringify(input) }),
   apply: (id: string) => request<SchemaBlueprintSummary>(`/schema-blueprints/${id}/apply`, { method: "POST" }),
   drop: (id: string, tableName: string, cascade = false) => request<{ dropped: true; deletedSyncDefinitions: number }>(`/schema-blueprints/${id}/table?confirm=${encodeURIComponent(tableName)}&cascade=${cascade}`, { method: "DELETE" }),
   deleteBlueprint: (id: string, tableName: string) => request<{ deleted: true }>(`/schema-blueprints/${id}/blueprint?confirm=${encodeURIComponent(tableName)}`, { method: "DELETE" })
@@ -112,6 +119,7 @@ export const schemaApi = {
 export const syncApi = {
   list: () => request<SyncDefinitionSummary[]>("/sync-definitions"),
   create: (input: CreateSyncDefinitionInput) => request<SyncDefinitionSummary>("/sync-definitions", { method: "POST", body: JSON.stringify(input) }),
+  update: (id: string, input: UpdateSyncDefinitionInput) => request<SyncDefinitionSummary>(`/sync-definitions/${id}`, { method: "PUT", body: JSON.stringify(input) }),
   run: (id: string) => request<SyncDefinitionSummary>(`/sync-definitions/${id}/run`, { method: "POST" }),
   schedule: (id: string, input: UpsertScheduleInput) => request<SyncDefinitionSummary>(`/sync-definitions/${id}/schedule`, { method: "PUT", body: JSON.stringify(input) }),
   deleteSchedule: (id: string) => request<{ deleted: true }>(`/sync-definitions/${id}/schedule`, { method: "DELETE" }),
