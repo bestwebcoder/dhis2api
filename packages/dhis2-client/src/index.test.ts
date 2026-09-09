@@ -149,7 +149,7 @@ describe("Dhis2Client", () => {
       fetchImplementation: fetchMock
     });
 
-    const result = await client.getTrackerEntities("IpHINAT79UW", 1, 1);
+    const result = await client.getTrackerEntities({ programUid: "IpHINAT79UW", page: 1, pageSize: 1 });
 
     const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
     expect(url.searchParams.get("ouMode")).toBe("ALL");
@@ -171,7 +171,7 @@ describe("Dhis2Client", () => {
       fetchImplementation: fetchMock
     });
 
-    const result = await client.getTrackerEntities("IpHINAT79UW", 2, 50);
+    const result = await client.getTrackerEntities({ programUid: "IpHINAT79UW", page: 2, pageSize: 50 });
 
     const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
     expect(url.searchParams.get("orgUnitMode")).toBe("ACCESSIBLE");
@@ -195,11 +195,104 @@ describe("Dhis2Client", () => {
       fetchImplementation: fetchMock
     });
 
-    await client.getTrackerEntities("IpHINAT79UW", 1, 50);
+    await client.getTrackerEntities({ programUid: "IpHINAT79UW", page: 1, pageSize: 50 });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const retryUrl = new URL(String(fetchMock.mock.calls[1]?.[0]));
     expect(retryUrl.searchParams.get("orgUnitMode")).toBe("ACCESSIBLE");
+  });
+
+  it("does not ask DHIS2 to count records while paging, and counts only when probing", async () => {
+    // A Response body can only be read once, so build a fresh one per request.
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () =>
+      new Response(JSON.stringify({ instances: [], page: 1, pageSize: 50 }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const client = new Dhis2Client({
+      baseUrl: "https://example.org/dhis",
+      credential: { type: "pat", apiToken: "secret" },
+      dhis2Version: "2.41.3",
+      fetchImplementation: fetchMock
+    });
+
+    await client.getTrackerEntities({ programUid: "IpHINAT79UW", page: 3, pageSize: 50 });
+    await client.getTrackerEntities({ programUid: "IpHINAT79UW", pageSize: 1, withTotals: true });
+
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get("totalPages")).toBe("false");
+    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get("totalPages")).toBe("true");
+  });
+
+  it("passes an update window and an organisation-unit scope to the tracker export", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ instances: [], page: 1, pageSize: 50 }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const client = new Dhis2Client({
+      baseUrl: "https://example.org/dhis",
+      credential: { type: "pat", apiToken: "secret" },
+      dhis2Version: "2.41.3",
+      fetchImplementation: fetchMock
+    });
+
+    await client.getTrackerEntities({
+      programUid: "IpHINAT79UW",
+      updatedAfter: "2026-01-01T00:00:00.000Z",
+      updatedBefore: "2026-02-01T00:00:00.000Z",
+      orgUnitUids: ["DiszpKrYNg8", "g8upMTyEZGZ"]
+    });
+
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(url.searchParams.get("updatedAfter")).toBe("2026-01-01T00:00:00.000Z");
+    expect(url.searchParams.get("updatedBefore")).toBe("2026-02-01T00:00:00.000Z");
+    expect(url.searchParams.get("orgUnitMode")).toBe("SELECTED");
+    expect(url.searchParams.get("orgUnits")).toBe("DiszpKrYNg8;g8upMTyEZGZ");
+  });
+
+  it("rejects an organisation-unit scope that is not made of DHIS2 identifiers", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = new Dhis2Client({
+      baseUrl: "https://example.org/dhis",
+      credential: { type: "pat", apiToken: "secret" },
+      fetchImplementation: fetchMock
+    });
+
+    await expect(client.getTrackerEntities({
+      programUid: "IpHINAT79UW",
+      orgUnitUids: ["DiszpKrYNg8; DROP TABLE"]
+    })).rejects.toThrow("Invalid DHIS2 UID");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("translates the update window to the pre-2.36 parameter names", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ trackedEntityInstances: [], page: 1, pageSize: 50 }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const client = new Dhis2Client({
+      baseUrl: "https://example.org/dhis",
+      credential: { type: "pat", apiToken: "secret" },
+      dhis2Version: "2.35.1",
+      fetchImplementation: fetchMock
+    });
+
+    await client.getLegacyTrackerEntities({
+      programUid: "IpHINAT79UW",
+      updatedAfter: "2026-01-01T00:00:00.000Z",
+      updatedBefore: "2026-02-01T00:00:00.000Z"
+    });
+
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(url.searchParams.get("lastUpdatedStartDate")).toBe("2026-01-01");
+    // Both legacy bounds are inclusive days, so the window stops the day before
+    // the next partition starts rather than re-reading the boundary day.
+    expect(url.searchParams.get("lastUpdatedEndDate")).toBe("2026-01-31");
+    expect(url.searchParams.get("ouMode")).toBe("ALL");
   });
 
   it("downloads event-program records from the tracker events endpoint", async () => {
@@ -216,7 +309,7 @@ describe("Dhis2Client", () => {
       fetchImplementation: fetchMock
     });
 
-    const result = await client.getTrackerEvents("bMcwwoVnbSR", 1, 250);
+    const result = await client.getTrackerEvents({ programUid: "bMcwwoVnbSR", page: 1, pageSize: 250 });
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/tracker/events?");
     expect(result.instances).toHaveLength(1);

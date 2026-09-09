@@ -55,6 +55,28 @@ export interface TrackerPage {
   hasNextPage: boolean;
 }
 
+export interface TrackerQuery {
+  programUid: string;
+  page?: number;
+  pageSize?: number;
+  timeoutMs?: number;
+  /**
+   * Restrict the export to these organisation units. Omitting them keeps the
+   * whole accessible scope, which is what an unpartitioned sync wants.
+   */
+  orgUnitUids?: string[];
+  /** Inclusive lower bound on the record update time (ISO date or date-time). */
+  updatedAfter?: string;
+  /** Exclusive upper bound on the record update time (ISO date or date-time). */
+  updatedBefore?: string;
+  /**
+   * Ask DHIS2 to count every matching record. On a large tracker database that
+   * count is a full scan, so request it only for a partition-planning probe and
+   * never for the pages of an actual download.
+   */
+  withTotals?: boolean;
+}
+
 export interface DataValueSetResponse {
   dataSet?: string;
   period?: string;
@@ -122,6 +144,34 @@ export function inferCapabilities(version: string | undefined): Dhis2Capabilitie
     legacyTrackerApi: { available: Boolean(parsed?.major === 2), confidence: parsed ? "inferred" : "unknown", reason: versionReason },
     enrollmentAnalyticsApi: { available: atLeast(40), confidence: parsed ? "inferred" : "unknown", reason: versionReason },
     pushAnalyticsApi: { available: atLeast(35), confidence: parsed ? "inferred" : "unknown", reason: versionReason }
+  };
+}
+
+function assertOrgUnitUids(orgUnitUids: string[] | undefined): string[] {
+  const unique = [...new Set(orgUnitUids ?? [])];
+  for (const uid of unique) assertDhis2Uid(uid);
+  return unique;
+}
+
+function normalizeTrackerQuery(query: TrackerQuery): {
+  programUid: string;
+  page: number;
+  pageSize: number;
+  timeoutMs: number | undefined;
+} {
+  assertDhis2Uid(query.programUid);
+  return {
+    programUid: query.programUid,
+    page: Math.max(1, Math.trunc(query.page ?? 1)),
+    pageSize: Math.min(1000, Math.max(1, Math.trunc(query.pageSize ?? 500))),
+    timeoutMs: query.timeoutMs
+  };
+}
+
+function modernWindowParameters(query: TrackerQuery): Record<string, string> {
+  return {
+    ...(query.updatedAfter ? { updatedAfter: query.updatedAfter } : {}),
+    ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {})
   };
 }
 
@@ -274,79 +324,112 @@ export class Dhis2Client {
     );
   }
 
-  async getTrackerEntities(programUid: string, page = 1, pageSize = 500, timeoutMs?: number): Promise<TrackerPage> {
-    assertDhis2Uid(programUid);
-    const safePage = Math.max(1, Math.trunc(page));
-    const safePageSize = Math.min(1000, Math.max(1, Math.trunc(pageSize)));
+  async getTrackerEntities(query: TrackerQuery): Promise<TrackerPage> {
+    const { programUid, page, pageSize, timeoutMs } = normalizeTrackerQuery(query);
     const fields = "trackedEntity,trackedEntityType,orgUnit,createdAt,updatedAt,attributes[attribute,value,createdAt,updatedAt],enrollments[enrollment,program,orgUnit,enrolledAt,occurredAt,createdAt,updatedAt,status,attributes[attribute,value,createdAt,updatedAt],events[event,programStage,orgUnit,occurredAt,scheduledAt,createdAt,updatedAt,status,dataValues[dataElement,value,createdAt,updatedAt]]";
     const response = await this.getTrackerCollection("tracker/trackedEntities", {
       program: programUid,
-      page: String(safePage),
-      pageSize: String(safePageSize),
-      totalPages: "true",
-      fields
-    }, timeoutMs);
+      page: String(page),
+      pageSize: String(pageSize),
+      totalPages: String(query.withTotals === true),
+      fields,
+      ...modernWindowParameters(query)
+    }, query.orgUnitUids, timeoutMs);
     const instances = Array.isArray(response.instances)
       ? response.instances as Record<string, unknown>[]
       : Array.isArray(response.trackedEntityInstances)
         ? response.trackedEntityInstances as Record<string, unknown>[]
         : [];
-    return this.toTrackerPage(response, instances, safePage, safePageSize);
+    return this.toTrackerPage(response, instances, page, pageSize);
   }
 
-  async getTrackerEvents(programUid: string, page = 1, pageSize = 500, timeoutMs?: number): Promise<TrackerPage> {
-    assertDhis2Uid(programUid);
-    const safePage = Math.max(1, Math.trunc(page));
-    const safePageSize = Math.min(1000, Math.max(1, Math.trunc(pageSize)));
+  async getTrackerEvents(query: TrackerQuery): Promise<TrackerPage> {
+    const { programUid, page, pageSize, timeoutMs } = normalizeTrackerQuery(query);
     const fields = "event,program,programStage,orgUnit,occurredAt,scheduledAt,createdAt,updatedAt,status,dataValues[dataElement,value,createdAt,updatedAt]";
     const response = await this.getTrackerCollection("tracker/events", {
       program: programUid,
-      page: String(safePage),
-      pageSize: String(safePageSize),
-      totalPages: "true",
-      fields
-    }, timeoutMs);
+      page: String(page),
+      pageSize: String(pageSize),
+      totalPages: String(query.withTotals === true),
+      fields,
+      ...modernWindowParameters(query)
+    }, query.orgUnitUids, timeoutMs);
     const instances = Array.isArray(response.instances)
       ? response.instances as Record<string, unknown>[]
       : Array.isArray(response.events)
         ? response.events as Record<string, unknown>[]
         : [];
-    return this.toTrackerPage(response, instances, safePage, safePageSize);
+    return this.toTrackerPage(response, instances, page, pageSize);
   }
 
-  async getLegacyTrackerEntities(programUid: string, page = 1, pageSize = 500, timeoutMs?: number): Promise<TrackerPage> {
-    assertDhis2Uid(programUid);
-    const safePage = Math.max(1, Math.trunc(page));
-    const safePageSize = Math.min(1000, Math.max(1, Math.trunc(pageSize)));
+  async getLegacyTrackerEntities(query: TrackerQuery): Promise<TrackerPage> {
+    const { programUid, page, pageSize, timeoutMs } = normalizeTrackerQuery(query);
     const fields = "trackedEntityInstance,trackedEntityType,orgUnit,created,lastUpdated,attributes[attribute,value,created,lastUpdated],enrollments[enrollment,program,orgUnit,enrollmentDate,incidentDate,created,lastUpdated,status,events[event,programStage,orgUnit,eventDate,dueDate,created,lastUpdated,status,dataValues[dataElement,value,created,lastUpdated]]";
+    const parameters = new URLSearchParams({
+      program: programUid,
+      page: String(page),
+      pageSize: String(pageSize),
+      totalPages: String(query.withTotals === true),
+      fields
+    });
+    // The pre-2.36 endpoint names the update window differently and only accepts
+    // calendar dates. Both of its bounds are inclusive days, so an upper bound
+    // taken verbatim would re-download the whole boundary day in the next
+    // partition. Ending a day early is safe because the following partition's
+    // lower bound truncates down to midnight and still covers that day in full.
+    if (query.updatedAfter) parameters.set("lastUpdatedStartDate", query.updatedAfter.slice(0, 10));
+    if (query.updatedBefore) {
+      const exclusiveEnd = Date.parse(query.updatedBefore);
+      if (Number.isNaN(exclusiveEnd)) throw new Error(`Invalid updatedBefore value: ${query.updatedBefore}`);
+      parameters.set("lastUpdatedEndDate", new Date(exclusiveEnd - 86_400_000).toISOString().slice(0, 10));
+    }
+    const orgUnitUids = assertOrgUnitUids(query.orgUnitUids);
+    if (orgUnitUids.length) {
+      parameters.set("ouMode", "SELECTED");
+      parameters.set("orgUnit", orgUnitUids.join(";"));
+    } else {
+      parameters.set("ouMode", "ALL");
+    }
     const response = await this.getJson<Record<string, unknown>>(
-      `trackedEntityInstances.json?program=${programUid}&ouMode=ALL&page=${safePage}&pageSize=${safePageSize}&totalPages=true&fields=${encodeURIComponent(fields)}`,
+      `trackedEntityInstances.json?${parameters.toString()}`,
       timeoutMs
     );
     const instances = Array.isArray(response.trackedEntityInstances)
       ? response.trackedEntityInstances as Record<string, unknown>[]
       : [];
-    return this.toTrackerPage(response, instances, safePage, safePageSize);
+    return this.toTrackerPage(response, instances, page, pageSize);
   }
 
-  private trackerScopeCandidates(): Array<[string, string]> {
+  /**
+   * DHIS2 renamed the tracker scope parameters in 2.41 (`ouMode` became
+   * `orgUnitMode`, `orgUnit` became `orgUnits`). Try the spelling that matches
+   * the detected version first and keep the other as a fallback, because a
+   * connection can report a version that does not match its deployed API.
+   */
+  private trackerScopeCandidates(orgUnitUids: string[]): Array<Record<string, string>> {
     const version = parseDhis2Version(this.dhis2Version ?? undefined);
+    const modern = orgUnitUids.length
+      ? { orgUnitMode: "SELECTED", orgUnits: orgUnitUids.join(";") }
+      : { orgUnitMode: "ACCESSIBLE" };
+    const legacy = orgUnitUids.length
+      ? { ouMode: "SELECTED", orgUnit: orgUnitUids.join(";") }
+      : { ouMode: "ALL" };
     return version && (version.major > 2 || version.minor >= 41)
-      ? [["orgUnitMode", "ACCESSIBLE"], ["ouMode", "ALL"]]
-      : [["ouMode", "ALL"], ["orgUnitMode", "ACCESSIBLE"]];
+      ? [modern, legacy]
+      : [legacy, modern];
   }
 
   private async getTrackerCollection(
     path: string,
     parameters: Record<string, string>,
+    orgUnitUids: string[] | undefined,
     timeoutMs?: number
   ): Promise<Record<string, unknown>> {
-    const scopes = this.trackerScopeCandidates();
+    const scopes = this.trackerScopeCandidates(assertOrgUnitUids(orgUnitUids));
     let lastError: unknown;
     for (let index = 0; index < scopes.length; index += 1) {
-      const [scopeName, scopeValue] = scopes[index]!;
       const query = new URLSearchParams(parameters);
-      query.set(scopeName, scopeValue);
+      for (const [name, value] of Object.entries(scopes[index]!)) query.set(name, value);
       try {
         return await this.getJson<Record<string, unknown>>(`${path}?${query.toString()}`, timeoutMs);
       } catch (error) {
