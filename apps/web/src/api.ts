@@ -17,7 +17,7 @@ import type {
   UpsertScheduleInput
 } from "@dhis-sync/contracts";
 
-export const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4000/api/v1";
+export const API_URL = (import.meta.env.VITE_API_URL?.trim() || "http://localhost:4000/api/v1").replace(/\/+$/, "");
 
 function connectionPayload(input: CreateConnectionInput): CreateConnectionInput {
   const common = {
@@ -45,7 +45,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     });
   } catch (cause) {
     if (cause instanceof TypeError) {
-      throw new Error(`Cannot reach the local API at ${API_URL}. Make sure the API server is running, then try again.`);
+      throw new Error(`Cannot reach the API at ${API_URL}. Check that the API is running and allows requests from this website.`);
     }
     throw cause;
   }
@@ -65,7 +65,7 @@ async function download(path: string): Promise<string> {
   try {
     response = await fetch(`${API_URL}${path}`);
   } catch (cause) {
-    if (cause instanceof TypeError) throw new Error(`Cannot reach the local API at ${API_URL}. Make sure the API server is running, then try again.`);
+    if (cause instanceof TypeError) throw new Error(`Cannot reach the API at ${API_URL}. Check that the API is running and allows requests from this website.`);
     throw cause;
   }
   if (!response.ok) {
