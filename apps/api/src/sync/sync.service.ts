@@ -1,7 +1,14 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import type { CreateSyncDefinitionInput, SyncDefinitionSummary, UpdateSyncDefinitionInput, UpsertScheduleInput } from "@dhis-sync/contracts";
 import type { PoolClient } from "pg";
-import { Dhis2HttpError } from "@dhis-sync/dhis2-client";
+import { Dhis2HttpError, type TrackerPage } from "@dhis-sync/dhis2-client";
+import {
+  AdaptivePageSize,
+  describeTrackerPartition,
+  initialTrackerPartition,
+  splitTrackerPartition,
+  type TrackerPartition
+} from "./tracker-partition.js";
 import { ConnectionService } from "../connections/connection.service.js";
 import { SyncRepository } from "./sync.repository.js";
 
@@ -89,6 +96,39 @@ export function trackerPageSize(configuredBatchSize: number, metadata: JsonRecor
 function stagingTableName(table: string, runId: string): string {
   const suffix = runId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase().slice(0, 12);
   return `sync_${table.slice(0, 44)}_${suffix}`.slice(0, 63);
+}
+
+/**
+ * Each tracker partition streams into its own table so a failed partition is
+ * rolled back by dropping that table, leaving the rows already gathered by
+ * every completed partition untouched.
+ */
+function partitionTableName(table: string, runId: string, index: number): string {
+  const suffix = runId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase().slice(0, 8);
+  return `syncp_${table.slice(0, 34)}_${suffix}_${index}`.slice(0, 63);
+}
+
+/** Guards against a pathological split loop turning into unbounded table churn. */
+const MAXIMUM_TRACKER_PARTITIONS = 5_000;
+
+const sumCounts = (left: RunCounts, right: RunCounts): RunCounts => ({
+  read: left.read + right.read,
+  written: left.written + right.written,
+  skipped: left.skipped + right.skipped,
+  failed: left.failed + right.failed
+});
+
+/**
+ * Record ceiling that makes a partition worth downloading in one piece. A
+ * counted probe costs one request; splitting anything larger keeps offset
+ * paging shallow. Zero disables probing entirely for callers that would rather
+ * spend no requests on planning.
+ */
+export function partitionRecordLimit(filters: JsonRecord): number {
+  const configured = Number(filters.maxRecordsPerPartition ?? 25_000);
+  if (!Number.isFinite(configured)) return 25_000;
+  if (configured <= 0) return 0;
+  return Math.min(1_000_000, Math.max(500, Math.trunc(configured)));
 }
 
 function coerce(value: unknown, sqlType: string): unknown {
@@ -468,62 +508,157 @@ export class SyncService implements OnModuleInit, OnModuleDestroy {
         .map((org) => [String(org.id), String(org.displayName ?? org.name ?? org.id)] as const)
     );
     const isEventProgram = text(definition.metadata.programType) === "WITHOUT_REGISTRATION";
-    const requestedPageSize = Number(definition.filters?.trackerPageSize ?? definition.batch_size);
-    let pageSize = trackerPageSize(
+    const filters = definition.filters ?? {};
+    const requestedPageSize = Number(filters.trackerPageSize ?? definition.batch_size);
+    const pageSizes = new AdaptivePageSize(trackerPageSize(
       Number.isFinite(requestedPageSize) ? requestedPageSize : definition.batch_size,
       definition.metadata
-    );
+    ));
+    const recordLimit = partitionRecordLimit(filters);
+    const historyStartDate = text(filters.historyStartDate);
+    // Narrowing the scope to the program's assigned organisation units changes
+    // which records DHIS2 returns, so it stays opt-in. Without it the timeline
+    // is still tiled completely and the run keeps its current scope.
+    const orgUnitUids = filters.orgUnitPartitioning === true
+      ? array(definition.metadata.organisationUnits)
+        .map((org) => text(org.id))
+        .filter((uid): uid is string => Boolean(uid))
+      : [];
+    const queue: TrackerPartition[] = [initialTrackerPartition(new Date(), {
+      ...(historyStartDate ? { historyStartDate } : {}),
+      ...(orgUnitUids.length ? { orgUnitUids } : {})
+    })];
 
-    while (true) {
-      let page = 1;
-      let useLegacyTracker = false;
+    let useLegacyTracker = false;
+    const fetchPage = async (
+      partition: TrackerPartition,
+      page: number,
+      pageSize: number,
+      withTotals: boolean
+    ): Promise<TrackerPage> => {
+      const query = {
+        programUid: definition.resource_uid,
+        page,
+        pageSize,
+        timeoutMs: 60_000,
+        updatedAfter: partition.updatedAfter,
+        updatedBefore: partition.updatedBefore,
+        ...(partition.orgUnitUids ? { orgUnitUids: partition.orgUnitUids } : {}),
+        ...(withTotals ? { withTotals: true } : {})
+      };
+      if (isEventProgram) return client.getTrackerEvents(query);
+      if (useLegacyTracker) return client.getLegacyTrackerEntities(query);
       try {
-        do {
-          let response;
-          let batchRows: JsonRecord[];
-          if (isEventProgram) {
-            response = await client.getTrackerEvents(definition.resource_uid, page, pageSize, 60_000);
-            batchRows = response.instances.map((event) => flattenProgramEvent(event, columns, orgNames, runId));
-          } else {
-            if (useLegacyTracker) {
-              response = await client.getLegacyTrackerEntities(definition.resource_uid, page, pageSize, 60_000);
-            } else {
-              try {
-                response = await client.getTrackerEntities(definition.resource_uid, page, pageSize, 60_000);
-              } catch (modernError) {
-                if (!canUseLegacyTrackerFallback(modernError)) throw modernError;
-                useLegacyTracker = true;
-                response = await client.getLegacyTrackerEntities(definition.resource_uid, page, pageSize, 60_000);
-              }
+        return await client.getTrackerEntities(query);
+      } catch (modernError) {
+        if (!canUseLegacyTrackerFallback(modernError)) throw modernError;
+        useLegacyTracker = true;
+        return client.getLegacyTrackerEntities(query);
+      }
+    };
+
+    let partitionIndex = 0;
+    while (queue.length) {
+      const partition = queue.shift()!;
+      if (partitionIndex >= MAXIMUM_TRACKER_PARTITIONS) {
+        throw new Error("DHIS2 tracker partitioning safety limit reached; raise maxRecordsPerPartition or narrow the sync filters");
+      }
+      const partitionTable = partitionTableName(definition.table_name, runId, partitionIndex);
+      partitionIndex += 1;
+      const partitionCounts: RunCounts = { read: 0, written: 0, skipped: 0, failed: 0 };
+      let prepared = false;
+      try {
+        if (recordLimit > 0) {
+          // One counted request per partition. This is the only place a sync
+          // asks DHIS2 to count, because a count is a full scan on a large
+          // tracker database and must never run once per page.
+          const probe = await fetchPage(partition, 1, 1, true);
+          if (probe.total === 0) continue;
+          if (probe.total !== undefined && probe.total > recordLimit) {
+            const halves = splitTrackerPartition(partition);
+            if (halves) {
+              this.logger.log(
+                `Tracker partition ${describeTrackerPartition(partition)} holds ${probe.total} records; splitting before download`
+              );
+              queue.unshift(...halves);
+              continue;
             }
-            batchRows = response.instances.map((entity) =>
-              flattenTracker(entity, columns, orgNames, runId, definition.resource_uid)
-            );
           }
-          counts.read += response.instances.length;
-          counts.written += await this.insertRows(definition.schema_name, stagingTable, columns, batchRows);
-          await this.repository.updateRunProgress(runId, counts);
-          if (!response.hasNextPage) return;
+        }
+
+        await this.prepareStagingTable(definition.schema_name, definition.table_name, partitionTable);
+        prepared = true;
+        let page = 1;
+        while (true) {
+          const startedAt = Date.now();
+          const response = await fetchPage(partition, page, pageSizes.current, false);
+          pageSizes.recordSuccess(Date.now() - startedAt);
+          const batchRows = isEventProgram
+            ? response.instances.map((event) => flattenProgramEvent(event, columns, orgNames, runId))
+            : response.instances.map((entity) =>
+              flattenTracker(entity, columns, orgNames, runId, definition.resource_uid));
+          partitionCounts.read += response.instances.length;
+          partitionCounts.written += await this.insertRows(definition.schema_name, partitionTable, columns, batchRows);
+          await this.repository.updateRunProgress(runId, sumCounts(counts, partitionCounts));
+          if (!response.hasNextPage) break;
           page += 1;
           if (page > 100_000) throw new Error("DHIS2 tracker paging safety limit reached");
-        } while (true);
-      } catch (error) {
-        if (!canSplitRequestError(error) || pageSize <= 1) throw error;
-        const smallerPageSize = Math.max(1, Math.floor(pageSize / 2));
-        this.logger.warn(
-          `Tracker page ${page} timed out at ${pageSize} records; restarting safely with page size ${smallerPageSize}`
-        );
-        // Page size changes alter page offsets, so restart from page 1 to prevent
-        // skipped or duplicated tracked entities. The live table is still intact.
-        await this.repository.query(`TRUNCATE TABLE ${quote(definition.schema_name)}.${quote(stagingTable)}`);
-        counts.read = 0;
-        counts.written = 0;
-        counts.skipped = 0;
-        counts.failed = 0;
+        }
+
+        // An empty window still costs a table create and drop, but merging zero
+        // rows would add a pointless transaction on top of that.
+        if (partitionCounts.read > 0) {
+          await this.mergePartitionTable(definition.schema_name, stagingTable, partitionTable, columns);
+          prepared = false;
+        }
+        counts.read += partitionCounts.read;
+        counts.written += partitionCounts.written;
+        counts.skipped += partitionCounts.skipped;
+        counts.failed += partitionCounts.failed;
         await this.repository.updateRunProgress(runId, counts);
-        pageSize = smallerPageSize;
+      } catch (error) {
+        if (!canSplitRequestError(error)) throw error;
+        // Dropping this partition's table in the finally block discards exactly
+        // the rows it wrote, so retrying it cannot duplicate or skip records and
+        // every completed partition keeps its data.
+        const halves = splitTrackerPartition(partition);
+        if (halves) {
+          this.logger.warn(
+            `Tracker partition ${describeTrackerPartition(partition)} failed; retrying it as two smaller partitions`
+          );
+          queue.unshift(...halves);
+        } else if (pageSizes.recordFailure()) {
+          this.logger.warn(
+            `Tracker partition ${describeTrackerPartition(partition)} failed and cannot be divided further; retrying at page size ${pageSizes.current}`
+          );
+          queue.unshift(partition);
+        } else throw error;
+      } finally {
+        if (prepared) {
+          await this.dropStagingTable(definition.schema_name, partitionTable).catch((dropError) =>
+            this.logger.warn(`Could not remove partition table ${partitionTable}: ${dropError instanceof Error ? dropError.message : String(dropError)}`)
+          );
+        }
       }
     }
+  }
+
+  private async mergePartitionTable(
+    schema: string,
+    stagingTable: string,
+    partitionTable: string,
+    columns: Column[]
+  ): Promise<void> {
+    const names = columns.map((column) => column.column_name).filter((name) => name !== "record_id");
+    if (!names.length) throw new Error("The generated table has no writable columns");
+    const columnList = names.map(quote).join(",");
+    await this.repository.transaction<void>(async (client: PoolClient) => {
+      await client.query(
+        `INSERT INTO ${quote(schema)}.${quote(stagingTable)} (${columnList}) `
+        + `SELECT ${columnList} FROM ${quote(schema)}.${quote(partitionTable)}`
+      );
+      await client.query(`DROP TABLE ${quote(schema)}.${quote(partitionTable)}`);
+    });
   }
 
   private async runDueSchedules(): Promise<void> {

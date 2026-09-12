@@ -8,6 +8,7 @@ import type {
   Dhis2Capabilities
 } from "@dhis-sync/contracts";
 import { connectionApi } from "./api.js";
+import { AdminOnlyNote, useIsAdmin } from "./auth-context.js";
 
 const emptyForm: CreateConnectionInput = {
   name: "",
@@ -55,6 +56,7 @@ export function ConnectionManager() {
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const [editing, setEditing] = useState<ConnectionSummary | null>(null);
   const [connectionActive, setConnectionActive] = useState(true);
+  const isAdmin = useIsAdmin();
 
   const healthyCount = useMemo(
     () => connections.filter((item) => item.lastTestStatus === "healthy").length,
@@ -216,12 +218,12 @@ export function ConnectionManager() {
       )}
 
       <section className="panel connections-panel">
-        <div className="panel-heading"><div><p className="step">Endpoint registry</p><h2>Configured instances</h2></div><button className="text-button" onClick={() => void load()}>Refresh</button></div>
+        <div className="panel-heading"><div><p className="step">Endpoint registry</p><h2>Configured instances</h2></div><div className="heading-actions">{!isAdmin && <AdminOnlyNote />}<button className="text-button" onClick={() => void load()}>Refresh</button></div></div>
         {loading ? <div className="empty">Loading connections…</div> : connections.length === 0 ? (
           <div className="empty"><div className="empty-icon">↔</div><h3>No endpoints configured</h3><p>Add the source DHIS2 instance to begin metadata discovery.</p><button className="button button--primary" onClick={() => setShowForm(true)}>Add first connection</button></div>
         ) : (
           <div className="table-wrap"><table><thead><tr><th>Instance</th><th>Role</th><th>Version</th><th>Capabilities</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{connections.map((connection) => (
-            <tr key={connection.id}><td><strong>{connection.name}</strong><small>{connection.baseUrl}</small></td><td><span className="role">{connection.role}</span></td><td>{connection.dhis2Version ?? "Unknown"}</td><td><CapabilityList capabilities={connection.capabilities} /></td><td><StatusBadge status={connection.lastTestStatus} /><small>{connection.lastTestedAt ? new Date(connection.lastTestedAt).toLocaleString() : "Not tested"}</small></td><td><div className="row-actions"><button className="text-button" disabled={busy === connection.id} onClick={() => startEdit(connection)}>Edit</button><button className="text-button" disabled={busy === connection.id} onClick={() => void retest(connection.id)}>{busy === connection.id ? "Working…" : "Retest"}</button><button className="text-button text-button--danger" disabled={busy === connection.id} onClick={() => void deleteConnection(connection)}>Delete</button></div></td></tr>
+            <tr key={connection.id}><td><strong>{connection.name}</strong><small>{connection.baseUrl}</small></td><td><span className="role">{connection.role}</span></td><td>{connection.dhis2Version ?? "Unknown"}</td><td><CapabilityList capabilities={connection.capabilities} /></td><td><StatusBadge status={connection.lastTestStatus} /><small>{connection.lastTestedAt ? new Date(connection.lastTestedAt).toLocaleString() : "Not tested"}</small></td><td><div className="row-actions"><button className="text-button" disabled={busy === connection.id} onClick={() => startEdit(connection)}>Edit</button><button className="text-button" disabled={busy === connection.id} onClick={() => void retest(connection.id)}>{busy === connection.id ? "Working…" : "Retest"}</button>{isAdmin && <button className="text-button text-button--danger" disabled={busy === connection.id} onClick={() => void deleteConnection(connection)}>Delete</button>}</div></td></tr>
           ))}</tbody></table></div>
         )}
       </section>

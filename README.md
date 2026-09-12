@@ -81,6 +81,27 @@ Requirements: Node.js 22 or newer, pnpm 11, and Docker.
 
 Open [http://localhost:5173](http://localhost:5173). The API health endpoint is [http://localhost:4000/api/v1/health](http://localhost:4000/api/v1/health).
 
+## Vercel frontend deployment
+
+The Vite dashboard and NestJS API are separate services. Deploying the dashboard
+does not start the API, PostgreSQL, or the background scheduler.
+
+1. Deploy `apps/api` on a persistent Node.js server with the required backend
+   environment variables from `.env.example` and a reachable PostgreSQL database.
+2. Verify `https://YOUR_BACKEND_HOST/api/v1/health` responds successfully.
+3. On the backend, set `WEB_ORIGIN=https://YOUR_FRONTEND_HOST` (no trailing slash)
+   and restart it so CORS allows your frontend's exact origin.
+4. In the Vercel frontend project's Settings → Environment Variables, set
+   `VITE_API_URL=https://YOUR_BACKEND_HOST/api/v1` for Production and, if used,
+   Preview. This is the hub backend URL, not a DHIS2 instance URL.
+5. Redeploy the frontend. Vite embeds the API URL during the build; editing an
+   environment variable does not update an existing deployment.
+
+Vercel builds reject missing, localhost, and non-HTTPS API URLs. Local development
+still supports `http://localhost:4000/api/v1`. Backend secrets such as
+`DATABASE_URL` and `CONNECTION_ENCRYPTION_KEY` belong on the backend and must not
+use the browser-visible `VITE_` prefix.
+
 ## Connection API
 
 | Method | Path | Purpose |

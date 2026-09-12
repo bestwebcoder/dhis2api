@@ -1,4 +1,6 @@
 import type {
+  AuthSession,
+  AuthUser,
   BackupAvailability,
   ConnectionSummary,
   ConnectionTestResult,
@@ -10,14 +12,17 @@ import type {
   ReportPage,
   ResourceType,
   SchemaBlueprintSummary,
+  SignInInput,
+  SignUpInput,
   SyncDefinitionSummary,
   UpdateBlueprintInput,
   UpdateConnectionInput,
   UpdateSyncDefinitionInput,
   UpsertScheduleInput
 } from "@dhis-sync/contracts";
+import { notifySessionExpired, readToken } from "./session-token.js";
 
-export const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4000/api/v1";
+export const API_URL = (import.meta.env.VITE_API_URL?.trim() || "http://localhost:4000/api/v1").replace(/\/+$/, "");
 
 function connectionPayload(input: CreateConnectionInput): CreateConnectionInput {
   const common = {
@@ -32,8 +37,15 @@ function connectionPayload(input: CreateConnectionInput): CreateConnectionInput 
     : { ...common, authType: "basic", username: input.username, password: input.password };
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+function authorized(init?: RequestInit): Headers {
   const headers = new Headers(init?.headers);
+  const token = readToken();
+  if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
+  return headers;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = authorized(init);
   if (init?.body !== undefined && !headers.has("Content-Type") && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
@@ -45,12 +57,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     });
   } catch (cause) {
     if (cause instanceof TypeError) {
-      throw new Error(`Cannot reach the local API at ${API_URL}. Make sure the API server is running, then try again.`);
+      throw new Error(`Cannot reach the API at ${API_URL}. Check that the API is running and allows requests from this website.`);
     }
     throw cause;
   }
   const payload = await response.json().catch(() => null) as unknown;
   if (!response.ok) {
+    // an expired or revoked token must drop the whole app back to signed-out,
+    // not surface as a per-page error the user cannot act on
+    if (response.status === 401 && !path.startsWith("/auth/")) notifySessionExpired();
     const candidate = payload as { message?: string | string[] } | null;
     const message = Array.isArray(candidate?.message)
       ? candidate.message.join(", ")
@@ -63,12 +78,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 async function download(path: string): Promise<string> {
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`);
+    response = await fetch(`${API_URL}${path}`, { headers: authorized() });
   } catch (cause) {
-    if (cause instanceof TypeError) throw new Error(`Cannot reach the local API at ${API_URL}. Make sure the API server is running, then try again.`);
+    if (cause instanceof TypeError) throw new Error(`Cannot reach the API at ${API_URL}. Check that the API is running and allows requests from this website.`);
     throw cause;
   }
   if (!response.ok) {
+    if (response.status === 401) notifySessionExpired();
     const payload = await response.json().catch(() => null) as { message?: string | string[] } | null;
     const message = Array.isArray(payload?.message) ? payload.message.join(", ") : payload?.message;
     throw new Error(message ?? `Download failed with HTTP ${response.status}`);
@@ -130,7 +146,13 @@ export const syncApi = {
 export const reportApi = {
   list: () => request<ReportDefinitionSummary[]>("/reports"),
   data: (id: string, parameters: URLSearchParams) => request<ReportPage>(`/reports/${id}/data?${parameters.toString()}`),
-  csvUrl: (id: string, parameters: URLSearchParams) => `${API_URL}/reports/${id}/export.csv?${parameters.toString()}`
+  downloadCsv: (id: string, parameters: URLSearchParams) => download(`/reports/${id}/export.csv?${parameters.toString()}`)
+};
+
+export const authApi = {
+  register: (input: SignUpInput) => request<AuthSession>("/auth/register", { method: "POST", body: JSON.stringify(input) }),
+  login: (input: SignInInput) => request<AuthSession>("/auth/login", { method: "POST", body: JSON.stringify(input) }),
+  me: () => request<AuthUser>("/auth/me")
 };
 
 export const backupApi = {

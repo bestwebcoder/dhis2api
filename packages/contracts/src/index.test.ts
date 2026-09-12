@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CreateConnectionSchema } from "./index.js";
+import { CreateConnectionSchema, SignInSchema, SignUpSchema } from "./index.js";
 
 const common = {
   name: "Training server",
@@ -39,5 +39,26 @@ describe("CreateConnectionSchema", () => {
       password: ""
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("SignUpSchema", () => {
+  const common = { name: "Amina Yusuf", email: "Amina@Ministry.GOV ", password: "correct-horse" };
+
+  it("normalises the email and defaults an absent organisation", () => {
+    const result = SignUpSchema.safeParse(common);
+    expect(result.success).toBe(true);
+    expect(result.data?.email).toBe("amina@ministry.gov");
+    expect(result.data?.organisation).toBe("");
+  });
+
+  it("rejects a malformed email and a short password", () => {
+    expect(SignUpSchema.safeParse({ ...common, email: "not-an-email" }).success).toBe(false);
+    expect(SignUpSchema.safeParse({ ...common, password: "short" }).success).toBe(false);
+  });
+
+  it("accepts any non-empty password on sign in so failures stay generic", () => {
+    expect(SignInSchema.safeParse({ email: "a@b.co", password: "x" }).success).toBe(true);
+    expect(SignInSchema.safeParse({ email: "a@b.co", password: "" }).success).toBe(false);
   });
 });

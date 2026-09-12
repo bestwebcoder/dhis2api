@@ -180,38 +180,94 @@ describe("tracker payload flattening", () => {
     expect(trackerPageSize(50, metadata)).toBe(50);
   });
 
-  it("restarts tracker pagination with a smaller page after a payload timeout", async () => {
+  const trackerRepository = (query: ReturnType<typeof vi.fn>, filters: Record<string, unknown>) => ({
+    find: vi.fn().mockResolvedValue({
+      id: "sync-id", source_connection_id: "connection-id", resource_type: "tracker",
+      resource_uid: "Prog1234567", schema_name: "dhis_data", table_name: "test_tracker",
+      batch_size: 250, filters,
+      metadata: { programType: "WITH_REGISTRATION", organisationUnits: [] },
+      columns: [column({ column_name: "tracked_entity_uid", source_kind: "system", source_uid: null })]
+    }),
+    createRun: vi.fn().mockResolvedValue("run-id"), updateRunProgress: vi.fn(), finishRun: vi.fn(), query,
+    transaction: vi.fn(async (callback: (client: { query: typeof query }) => Promise<void>) => callback({ query })),
+    list: vi.fn().mockResolvedValue([{ id: "sync-id" }])
+  });
+
+  const entityPage = (pageSize: number) => ({
+    instances: [{ trackedEntity: "tracked12345", enrollments: [] }],
+    page: 1, pageSize, hasNextPage: false
+  });
+
+  it("retries only the failed partition instead of restarting the whole download", async () => {
     const getTrackerEntities = vi.fn()
       .mockRejectedValueOnce(new Error("Could not reach DHIS2 after 3 attempts: timeout"))
-      .mockResolvedValueOnce({
-        instances: [{ trackedEntity: "tracked12345", enrollments: [] }],
-        page: 1, pageSize: 2, total: 1, hasNextPage: false
-      });
+      .mockResolvedValueOnce(entityPage(4))
+      .mockResolvedValueOnce(entityPage(4));
     const query = vi.fn().mockResolvedValue({ rows: [] });
-    const repository = {
-      find: vi.fn().mockResolvedValue({
-        id: "sync-id", source_connection_id: "connection-id", resource_type: "tracker",
-        resource_uid: "Prog1234567", schema_name: "dhis_data", table_name: "test_tracker",
-        batch_size: 250, filters: { trackerPageSize: 4 },
-        metadata: { programType: "WITH_REGISTRATION", organisationUnits: [] },
-        columns: [column({ column_name: "tracked_entity_uid", source_kind: "system", source_uid: null })]
-      }),
-      createRun: vi.fn().mockResolvedValue("run-id"), updateRunProgress: vi.fn(), finishRun: vi.fn(), query,
-      transaction: vi.fn(async (callback: (client: { query: typeof query }) => Promise<void>) => callback({ query })),
-      list: vi.fn().mockResolvedValue([{ id: "sync-id" }])
-    };
+    // maxRecordsPerPartition 0 turns off the counted probe so every request here
+    // is a page fetch and the call sequence stays readable.
+    const repository = trackerRepository(query, { trackerPageSize: 4, maxRecordsPerPartition: 0 });
     const service = new SyncService(repository as unknown as SyncRepository, {
       getAuthenticatedClient: vi.fn().mockResolvedValue({ getTrackerEntities })
     } as unknown as ConnectionService);
 
     await service.run("sync-id");
 
-    expect(getTrackerEntities.mock.calls).toEqual([
-      ["Prog1234567", 1, 4, 60_000],
-      ["Prog1234567", 1, 2, 60_000]
-    ]);
-    expect(query.mock.calls.some((call) => String(call[0]).includes("TRUNCATE TABLE") && String(call[0]).includes("sync_test_tracker"))).toBe(true);
+    const [first, second, third] = getTrackerEntities.mock.calls.map((call) => call[0]);
+    expect(getTrackerEntities).toHaveBeenCalledTimes(3);
+    // The timed-out window is halved and both halves are retried, so the two
+    // retries tile exactly the range the failed request covered.
+    expect(second.updatedAfter).toBe(first.updatedAfter);
+    expect(second.updatedBefore).toBe(third.updatedAfter);
+    expect(third.updatedBefore).toBe(first.updatedBefore);
+    // Splitting is preferred over shrinking, so the page size is untouched.
+    expect(second.pageSize).toBe(4);
+    // Nothing already downloaded is thrown away any more.
+    expect(query.mock.calls.some((call) =>
+      String(call[0]).includes("TRUNCATE TABLE") && String(call[0]).includes("sync_test_tracker"))).toBe(false);
+    expect(repository.finishRun).toHaveBeenCalledWith("run-id", { read: 2, written: 2, skipped: 0, failed: 0 });
+  });
+
+  it("counts a partition once and never asks DHIS2 for a total while paging", async () => {
+    const getTrackerEntities = vi.fn()
+      .mockResolvedValueOnce({ instances: [], page: 1, pageSize: 1, total: 4, hasNextPage: true })
+      .mockResolvedValueOnce(entityPage(250));
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const repository = trackerRepository(query, { maxRecordsPerPartition: 500 });
+    const service = new SyncService(repository as unknown as SyncRepository, {
+      getAuthenticatedClient: vi.fn().mockResolvedValue({ getTrackerEntities })
+    } as unknown as ConnectionService);
+
+    await service.run("sync-id");
+
+    const [probe, page] = getTrackerEntities.mock.calls.map((call) => call[0]);
+    expect(probe).toMatchObject({ withTotals: true, pageSize: 1 });
+    expect(page.withTotals).toBeUndefined();
     expect(repository.finishRun).toHaveBeenCalledWith("run-id", { read: 1, written: 1, skipped: 0, failed: 0 });
+  });
+
+  it("splits an oversized partition before downloading any of it", async () => {
+    const getTrackerEntities = vi.fn()
+      .mockResolvedValueOnce({ instances: [], page: 1, pageSize: 1, total: 5_000, hasNextPage: true })
+      .mockResolvedValueOnce({ instances: [], page: 1, pageSize: 1, total: 1, hasNextPage: true })
+      .mockResolvedValueOnce(entityPage(250))
+      .mockResolvedValueOnce({ instances: [], page: 1, pageSize: 1, total: 0, hasNextPage: false });
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const repository = trackerRepository(query, { maxRecordsPerPartition: 500 });
+    const service = new SyncService(repository as unknown as SyncRepository, {
+      getAuthenticatedClient: vi.fn().mockResolvedValue({ getTrackerEntities })
+    } as unknown as ConnectionService);
+
+    await service.run("sync-id");
+
+    const calls = getTrackerEntities.mock.calls.map((call) => call[0]);
+    // The oversized window is never paged; the next request is the probe for its
+    // first half, covering the same lower bound over half the range.
+    expect(calls[1]).toMatchObject({ withTotals: true, updatedAfter: calls[0].updatedAfter });
+    expect(calls[1].updatedBefore < calls[0].updatedBefore).toBe(true);
+    // The empty second half is skipped without ever creating a partition table.
+    expect(calls[3]).toMatchObject({ withTotals: true, updatedAfter: calls[1].updatedBefore });
+    expect(query.mock.calls.filter((call) => String(call[0]).includes("CREATE UNLOGGED TABLE"))).toHaveLength(2);
   });
 
   it("does not publish an unexpectedly empty tracker response", async () => {

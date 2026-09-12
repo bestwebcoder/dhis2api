@@ -48,6 +48,6 @@ describe("API request headers", () => {
     }));
 
     await expect(syncApi.delete("sync-id", "Temporary sync"))
-      .rejects.toThrow("Cannot reach the local API at");
+      .rejects.toThrow("Cannot reach the API at");
   });
 });
