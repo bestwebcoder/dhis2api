@@ -66,6 +66,8 @@ Every interpolated identifier must pass the `/^[a-z_][a-z0-9_]{0,62}$/` guard (`
 
 `SyncService` implements `OnModuleInit` and runs a `setInterval` poll every 5s inside the API process (`sync.service.ts:236`) — the BullMQ worker in `apps/worker` receives no real jobs yet. Overlap is prevented by an in-memory `runningDefinitions` set, which means **this only works with a single API replica**; a second replica would double-run schedules. Moving execution into the worker is the intended fix.
 
+This is why the API cannot be hosted serverlessly: nothing stays resident to poll. `Dockerfile` and `fly.toml` in the repo root deploy it to Fly with `auto_stop_machines = false` and a single machine; README covers the secrets and the one-off schema step. Do not raise the machine count without moving execution to the worker first.
+
 ### Authentication
 
 `apps/api/src/auth/` owns control-plane accounts, which are unrelated to the DHIS2 credentials in `dhis2_connections`. An `APP_GUARD` in `app.module.ts` registers `AuthGuard` globally, so **every route is closed unless it carries `@Public()`** — only `/auth/register`, `/auth/login` and `/health` do. A new controller is therefore protected without anyone remembering to protect it; use `@CurrentUser()` to read the caller.

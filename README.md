@@ -81,13 +81,70 @@ Requirements: Node.js 22 or newer, pnpm 11, and Docker.
 
 Open [http://localhost:5173](http://localhost:5173). The API health endpoint is [http://localhost:4000/api/v1/health](http://localhost:4000/api/v1/health).
 
+## API deployment (Fly.io)
+
+The API needs a **persistent** host: `SyncService` polls for due schedules every
+5s inside the process, and a tracker download can run for many minutes. Serverless
+platforms cannot host it — a Vercel deployment boots per request, so schedules
+never fire. `Dockerfile` and `fly.toml` in the repo root cover this; the dashboard
+stays on Vercel.
+
+```bash
+fly launch --no-deploy               # reuses the checked-in fly.toml
+fly postgres create --name dhis2api-db --region sin
+fly postgres attach dhis2api-db      # sets DATABASE_URL for you
+
+# CONNECTION_ENCRYPTION_KEY encrypts stored DHIS2 credentials. A new key cannot
+# decrypt rows written under an old one, so generate it once and keep it safe.
+fly secrets set \
+  CONNECTION_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+  AUTH_JWT_SECRET="$(openssl rand -base64 48)" \
+  WEB_ORIGIN="https://YOUR_FRONTEND_HOST"
+
+fly deploy
+fly ssh console -C "true"            # then apply the schema, below
+curl https://YOUR_APP.fly.dev/api/v1/health
+```
+
+There is no migration runner, so apply the schema once against the attached
+database — `fly proxy` forwards it to a local port:
+
+```bash
+fly proxy 15432:5432 -a dhis2api-db   # leave running in one terminal
+psql "postgresql://postgres:PASSWORD@localhost:15432/dhis2api" \
+  -v ON_ERROR_STOP=1 \
+  -f database/migrations/001_control_plane.sql \
+  -f database/migrations/002_auth.sql
+```
+
+Then open the dashboard and sign up — the first account on an empty `users` table
+becomes the admin — and re-add each DHIS2 connection, since credentials encrypted
+under a different key cannot be carried over.
+
+**Keep this at exactly one machine.** Overlap between scheduled runs is prevented
+by an in-memory set, so a second machine double-runs every schedule against the
+same tables. `fly scale count 1`, and move execution into `apps/worker` before
+scaling out.
+
+The image builds and runs locally too, which is the quickest way to check a change
+before deploying:
+
+```bash
+docker build -t dhis2api:local .
+docker run --rm -p 4100:4000 --network dhis2api_default \
+  -e DATABASE_URL="postgresql://dhis_sync:dhis_sync@postgres:5432/dhis_sync" \
+  -e CONNECTION_ENCRYPTION_KEY="$(grep '^CONNECTION_ENCRYPTION_KEY=' .env | cut -d= -f2-)" \
+  -e AUTH_JWT_SECRET="$(openssl rand -base64 48)" \
+  dhis2api:local
+```
+
 ## Vercel frontend deployment
 
 The Vite dashboard and NestJS API are separate services. Deploying the dashboard
 does not start the API, PostgreSQL, or the background scheduler.
 
-1. Deploy `apps/api` on a persistent Node.js server with the required backend
-   environment variables from `.env.example` and a reachable PostgreSQL database.
+1. Deploy `apps/api` on a persistent host — see the Fly.io section above — with the
+   backend environment variables from `.env.example` and a reachable PostgreSQL.
 2. Verify `https://YOUR_BACKEND_HOST/api/v1/health` responds successfully.
 3. On the backend, set `WEB_ORIGIN=https://YOUR_FRONTEND_HOST` (no trailing slash)
    and restart it so CORS allows your frontend's exact origin.
@@ -154,7 +211,10 @@ pnpm build
 ## Production hardening still recommended
 
 - Move scheduled execution entirely to BullMQ workers when deploying more than one API replica.
-- Add application login, role-based authorization, and audit-log viewer screens.
+- Move manual sync runs to the worker too: the endpoint holds the HTTP request open for the
+  whole run, which a load balancer will eventually cut off on a large download.
+- Add a migration runner, so a deploy applies `database/migrations/*.sql` instead of an operator remembering to.
+- Add user management screens and audit-log viewers; `role` and `is_active` are enforced but only changeable via SQL, and there is no password reset.
 - Add incremental cursor-based pulls after validating the exact DHIS2 version and Program-specific update semantics.
 - Add object-storage targets and retention policies for large backups.
 - Keep deterministic generation as the authority; if an LLM is added for label or type suggestions, require explicit review before applying DDL.

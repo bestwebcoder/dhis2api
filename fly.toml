@@ -1,0 +1,39 @@
+# API only. apps/web stays on Vercel; apps/worker is still a stub.
+app = 'dhis2api'
+primary_region = 'sin'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  NODE_ENV = 'production'
+  API_PORT = '4000'
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  # SyncService polls for due schedules every 5s in-process, so the machine has
+  # to stay resident. Letting Fly stop it on idle would silently stop scheduling.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/v1/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  # tracker syncs buffer a page of records at a time and scrypt costs 32MB per
+  # sign-in; 512mb is enough to boot but tight for a large download
+  memory = '1gb'
+  cpus = 1
+
+# DO NOT run more than one machine. Overlap between scheduled runs is prevented
+# by an in-memory set (sync.service.ts runningDefinitions), so a second machine
+# would double-run every schedule against the same tables. Scaling out requires
+# moving execution into apps/worker first.
