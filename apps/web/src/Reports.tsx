@@ -23,6 +23,7 @@ export function Reports() {
   const [editingColumns, setEditingColumns] = useState(false);
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => { reportApi.list().then((items) => { setReports(items); if (items[0]) setReportId(items[0].blueprintId); }).catch((cause) => setError(cause instanceof Error ? cause.message : "Could not load reports")); }, []);
@@ -32,6 +33,14 @@ export function Reports() {
     catch { setHiddenColumns(new Set()); }
     setEditingColumns(false);
   }, [reportId]);
+
+  async function downloadCsv() {
+    if (!reportId) return;
+    setDownloading(true); setError(null);
+    try { await reportApi.downloadCsv(reportId, parameters(1)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not export the report"); }
+    finally { setDownloading(false); }
+  }
 
   function toggleColumn(columnName: string) {
     setHiddenColumns((current) => {
@@ -80,7 +89,7 @@ export function Reports() {
   const pages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
 
   return <main className="content content--wide" id="main-content">
-    <header className="page-header"><div><p className="eyebrow">Operational reporting</p><h1>Single-line listing reports</h1><p className="lede">One row per tracked entity, with Program attributes and multi-stage events flattened according to the applied schema policy.</p></div><a className="button button--primary button-link" href={reportId ? reportApi.csvUrl(reportId, parameters(1)) : "#"}>Download CSV</a></header>
+    <header className="page-header"><div><p className="eyebrow">Operational reporting</p><h1>Single-line listing reports</h1><p className="lede">One row per tracked entity, with Program attributes and multi-stage events flattened according to the applied schema policy.</p></div><button type="button" className="button button--primary" disabled={!reportId || downloading} onClick={() => void downloadCsv()}>{downloading ? "Preparing CSV…" : "Download CSV"}</button></header>
     {error && <div className="alert alert--error"><strong>Unable to complete the request.</strong><span>{error}</span></div>}
     <section className="panel filter-panel"><div className="panel-heading"><div><p className="step">Advanced search</p><h2>{selected?.resourceName ?? "Select a report"}</h2></div><span className="role">{data?.total ?? selected?.rowCount ?? 0} rows</span></div>
       <form className="report-filters" onSubmit={submit}><label><span>Report</span><select value={reportId} onChange={(event) => setReportId(event.target.value)}>{reports.map((item) => <option value={item.blueprintId} key={item.blueprintId}>{item.resourceName}</option>)}</select></label><label><span>Facility</span><input value={facility} onChange={(event) => setFacility(event.target.value)} placeholder="Name or UID" /></label><label><span>Patient ID</span><input value={patientId} onChange={(event) => setPatientId(event.target.value)} placeholder="Patient identifier" /></label><label><span>From date</span><input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label><label><span>To date</span><input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label><label><span>Search all text</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, phone, value…" /></label><div className="filter-actions"><button className="button button--primary" disabled={!reportId || loading}>{loading ? "Loading…" : "View list"}</button><button type="button" className="button button--quiet" onClick={() => { setSearch(""); setFacility(""); setPatientId(""); setDateFrom(""); setDateTo(""); }}>Clear</button></div></form>

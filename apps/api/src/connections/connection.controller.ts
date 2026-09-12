@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Put, Query } from "@nestjs/common";
 import { CreateConnectionSchema, type CreateConnectionInput, UpdateConnectionSchema, type UpdateConnectionInput } from "@dhis-sync/contracts";
+import { Roles } from "../auth/roles.decorator.js";
 import { ConnectionService } from "./connection.service.js";
 
 function parseConnection(body: unknown): CreateConnectionInput {
@@ -49,6 +50,7 @@ export class ConnectionController {
     return this.connections.testSaved(id);
   }
 
+  @Roles("admin")
   @Delete(":id")
   delete(
     @Param("id", new ParseUUIDPipe()) id: string,

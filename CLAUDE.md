@@ -49,7 +49,7 @@ database/migrations     control-plane DDL
 
 There are two distinct layers in the same Postgres instance, and confusing them is the main way to break this codebase:
 
-- **Control plane** — the tables in `001_control_plane.sql` (`dhis2_connections`, `metadata_snapshots`, `schema_blueprints`, `schema_columns`, `sync_definitions`, `sync_schedules`, `sync_cursors`, `sync_runs`, `audit_log`). Always queried with bound parameters.
+- **Control plane** — the tables in `001_control_plane.sql` (`dhis2_connections`, `metadata_snapshots`, `schema_blueprints`, `schema_columns`, `sync_definitions`, `sync_schedules`, `sync_cursors`, `sync_runs`, `audit_log`) plus `users` from `002_auth.sql`. Always queried with bound parameters.
 - **Data plane** — reporting tables generated at runtime into the `dhis_data` schema, one per applied blueprint. Their names and columns come from DHIS2 metadata, so their SQL is necessarily interpolated as strings.
 
 Every interpolated identifier must pass the `/^[a-z_][a-z0-9_]{0,62}$/` guard (`quote()` in `sync.service.ts` / `report.service.ts`, the explicit checks in `schema.repository.ts`) before it reaches a query. `schema-generator.ts:safeIdentifier` is what produces names that satisfy it. Never interpolate a value — only identifiers.
@@ -66,10 +66,26 @@ Every interpolated identifier must pass the `/^[a-z_][a-z0-9_]{0,62}$/` guard (`
 
 `SyncService` implements `OnModuleInit` and runs a `setInterval` poll every 5s inside the API process (`sync.service.ts:236`) — the BullMQ worker in `apps/worker` receives no real jobs yet. Overlap is prevented by an in-memory `runningDefinitions` set, which means **this only works with a single API replica**; a second replica would double-run schedules. Moving execution into the worker is the intended fix.
 
+### Authentication
+
+`apps/api/src/auth/` owns control-plane accounts, which are unrelated to the DHIS2 credentials in `dhis2_connections`. An `APP_GUARD` in `app.module.ts` registers `AuthGuard` globally, so **every route is closed unless it carries `@Public()`** — only `/auth/register`, `/auth/login` and `/health` do. A new controller is therefore protected without anyone remembering to protect it; use `@CurrentUser()` to read the caller.
+
+The guard verifies the HS256 bearer token (`TokenService` pins `algorithms` so an `alg: none` or key-confusion token is rejected) and then resolves the subject against the `users` table on every request, so a deleted or deactivated account loses access immediately instead of at token expiry. Passwords are scrypt (`PasswordService`, `N=2^15, r=8, p=1`) stored as a self-describing `scrypt$N$r$p$salt$key` string, compared with `timingSafeEqual`; sign-in verifies against a decoy hash when no account matches so a wrong email costs the same as a wrong password, and both failures return one message. The first account created on an empty table becomes the `admin`; `AUTH_ALLOW_SIGNUP=false` closes self-service sign-up to everyone after that. `AUTH_JWT_SECRET` (≥32 chars) is required or the API fails at boot, like `CONNECTION_ENCRYPTION_KEY`.
+
+`RolesGuard` is registered as a second `APP_GUARD` **after** `AuthGuard`, so it can trust `request.user`. It is inert on routes without `@Roles(...)`, and returns `403` otherwise. `@Roles("admin")` covers every `DELETE` endpoint — connections, sync definitions, schedules, run history, blueprints, and the `DROP TABLE` — plus `POST /sync-definitions/:id/run`, because a run is a full replace and therefore destroys the table's current contents. An analyst can read, create, edit and apply, but cannot destroy anything.
+
+Adding a destructive route means adding the decorator; the guard cannot infer it from the HTTP verb. `auth/route-protection.test.ts` reflects over every controller and fails if a `DELETE` route, or the sync run, ever loses its `@Roles("admin")` — it also pins the list of `@Public()` routes.
+
+**Scheduled** runs are unaffected: the poller calls `SyncService.run` directly (`sync.service.ts:670`), never through the controller, so guards do not apply to them. Gating the endpoint restricts who can trigger a run by hand, not whether existing schedules fire.
+
+`apps/web/src/auth-context.tsx` mirrors this in the UI: `useIsAdmin()` hides delete controls and the manual-run button for analysts, and `AdminOnlyNote` explains why in the panel heading. That is cosmetic only — the API is the authority, and a hand-made request from an analyst still gets `403`.
+
 ### Request validation
 
 Controllers take `@Body() body: unknown` and validate with a zod schema from `@dhis-sync/contracts` via a local `parse*` helper that raises `BadRequestException` with `path: message` strings. There is no global `ValidationPipe` and no DTO classes — follow the existing per-controller pattern. UUID params use `ParseUUIDPipe`. Destructive endpoints take a `?confirm=<name>` query parameter that must match the entity's name.
 
 ### Frontend
 
-`apps/web/src/api.ts` is the only place that talks to the API; each page component (`ConnectionManager`, `SchemaBuilder`, `SyncSchedules`, `Reports`, `Backups`) owns its own fetch state and `App.tsx` switches between them with `useState` — no router, no data-fetching library, no CSS framework. `VITE_API_URL` is embedded at build time; `vite.config.ts` hard-fails a Vercel production build when it is missing, non-HTTPS, or localhost.
+`apps/web/src/api.ts` is the only place that talks to the API; each page component (`ConnectionManager`, `SchemaBuilder`, `SyncSchedules`, `Reports`, `Backups`) owns its own fetch state and `App.tsx` switches between them with `useState` — no router, no data-fetching library, no CSS framework.
+
+`App.tsx` gates the dashboard: with no session it renders `LandingPage` (marketing home page) plus `AuthDialog`, and the sidebar shell only once a user is resolved. Only the bearer token is cached (`localStorage`, `d2hub.token` via `session-token.ts`); the user object is never trusted from storage — on boot `restoreSession()` re-validates the token against `GET /auth/me`, and the shell waits behind a "Restoring your session" screen. `api.ts` attaches the token to every request and download, and a `401` from any endpoint calls `notifySessionExpired()`, which clears the token and drops the whole app back to signed-out rather than surfacing a per-page error. Because a bearer header cannot ride on a plain `<a href>`, the CSV export and backups both go through the authenticated blob download in `api.ts`. `VITE_API_URL` is embedded at build time; `vite.config.ts` hard-fails a Vercel production build when it is missing, non-HTTPS, or localhost.

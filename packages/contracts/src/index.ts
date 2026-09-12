@@ -264,3 +264,36 @@ export interface ReportPage {
   page: number;
   pageSize: number;
 }
+
+export const UserRoleSchema = z.enum(["admin", "analyst"]);
+export type UserRole = z.infer<typeof UserRoleSchema>;
+
+export const SignUpSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().toLowerCase().pipe(z.email()).pipe(z.string().max(254)),
+  organisation: z.string().trim().max(160).default(""),
+  password: z.string().min(8, "Use a password of at least 8 characters").max(200)
+});
+export type SignUpInput = z.infer<typeof SignUpSchema>;
+
+export const SignInSchema = z.object({
+  email: z.string().trim().toLowerCase().pipe(z.email()).pipe(z.string().max(254)),
+  password: z.string().min(1, "Enter your password").max(200)
+});
+export type SignInInput = z.infer<typeof SignInSchema>;
+
+export interface AuthUser {
+  id: string;
+  name: string;
+  email: string;
+  organisation: string;
+  role: UserRole;
+  lastLoginAt: string | null;
+  createdAt: string;
+}
+
+export interface AuthSession {
+  token: string;
+  expiresAt: string;
+  user: AuthUser;
+}
