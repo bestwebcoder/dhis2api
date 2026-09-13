@@ -5,6 +5,7 @@ import { Backups } from "./Backups.js";
 import { ConnectionManager } from "./ConnectionManager.js";
 import { LandingPage } from "./LandingPage.js";
 import { Overview } from "./Overview.js";
+import { ProfilePage } from "./ProfilePage.js";
 import { Reports } from "./Reports.js";
 import { SchemaBuilder } from "./SchemaBuilder.js";
 import { SyncSchedules } from "./SyncSchedules.js";
@@ -13,7 +14,7 @@ import { hasStoredToken, initials, onSessionExpired, restoreSession, signOut, ty
 import { CurrentUserProvider, ROLE_LABEL } from "./auth-context.js";
 import { useTheme } from "./theme.js";
 
-type Page = "overview" | "connections" | "schema" | "sync" | "reports" | "backups" | "admin";
+type Page = "overview" | "connections" | "schema" | "sync" | "reports" | "backups" | "admin" | "profile";
 
 /**
  * `adminOnly` keeps a page out of a client's navigation. It is presentation
@@ -106,6 +107,7 @@ export function App() {
           <button className="user-menu" aria-expanded={accountOpen} aria-haspopup="menu" onClick={(event) => { event.stopPropagation(); setAccountOpen((open) => !open); }}><span>{initials(user.name)}</span><div><strong>{user.name}</strong><small>{ROLE_LABEL[user.role]} · {user.organisation}</small></div></button>
           {accountOpen && <div className="account-menu" role="menu" onClick={(event) => event.stopPropagation()}>
             <div className="account-menu-head"><strong>{user.name}</strong><small>{user.email}</small><span className={`role-badge role-badge--${user.role}`}>{ROLE_LABEL[user.role]}</span></div>
+            <button type="button" className="account-menu-link" role="menuitem" aria-current={page === "profile" ? "page" : undefined} onClick={() => { setAccountOpen(false); navigate("profile"); }}>Your profile</button>
             <div className="account-menu-theme"><small>Appearance</small><ThemeChoice preference={preference} onChange={setPreference} /></div>
             <button type="button" role="menuitem" onClick={endSession}>Sign out</button>
           </div>}
@@ -119,6 +121,7 @@ export function App() {
         {page === "reports" && <Reports />}
         {page === "backups" && <Backups navigate={(target) => navigate(target as Page)} />}
         {page === "admin" && isAdmin && <AdminPanel />}
+        {page === "profile" && <ProfilePage onProfileChange={setUser} />}
       </CurrentUserProvider>
     </div>
   </div>;

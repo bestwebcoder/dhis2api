@@ -180,6 +180,8 @@ export const dashboardApi = {
 };
 
 export const userApi = {
+  /** The signed-in account's own profile; the API never returns anyone else's here. */
+  readOwnProfile: () => request<UserSummary>("/users/me/profile"),
   list: () => request<UserSummary[]>("/users"),
   create: (input: CreateUserInput) => request<UserSummary>("/users", { method: "POST", body: JSON.stringify(input) }),
   update: (id: string, input: UpdateUserInput) => request<UserSummary>(`/users/${id}`, { method: "PUT", body: JSON.stringify(input) }),
