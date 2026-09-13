@@ -1,4 +1,4 @@
-# API only. apps/web stays on Vercel; apps/worker is still a stub.
+# Backend API only. frontend/ stays on Vercel; backend/worker is still a stub.
 app = 'dhis2api'
 primary_region = 'sin'
 
@@ -36,4 +36,4 @@ primary_region = 'sin'
 # DO NOT run more than one machine. Overlap between scheduled runs is prevented
 # by an in-memory set (sync.service.ts runningDefinitions), so a second machine
 # would double-run every schedule against the same tables. Scaling out requires
-# moving execution into apps/worker first.
+# moving execution into backend/worker first.

@@ -1,16 +1,17 @@
 # the API image never needs the dashboard, the worker, or any local state
-apps/web
-apps/worker
+frontend
+backend/worker
+backend/database
 node_modules
 **/node_modules
 **/dist
 **/*.tsbuildinfo
 .git
 .github
-.env
-.env.*
-!.env.example
-database
+# ** so this still bites now that env files live per side rather than at the root
+**/.env
+**/.env.*
+!**/.env.example
 docker-compose.yml
 README.md
 CLAUDE.md

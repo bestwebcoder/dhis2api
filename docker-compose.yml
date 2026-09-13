@@ -9,7 +9,7 @@ services:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - dhis_sync_postgres:/var/lib/postgresql/data
-      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+      - ./backend/database/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dhis_sync -d dhis_sync"]
       interval: 5s

@@ -1,6 +1,13 @@
+# The architectural boundary, expressed as workspaces:
+#   frontend/  the browser app; depends on shared/ and nothing else
+#   backend/   the API, the worker, the DHIS2 adapter and the database schema
+#   shared/    the contract both sides agree on, and the only thing they share
 packages:
-  - apps/*
-  - packages/*
+  - frontend
+  - backend/api
+  - backend/worker
+  - backend/dhis2-client
+  - shared/contracts
 allowBuilds:
   esbuild: true
   msgpackr-extract: true
