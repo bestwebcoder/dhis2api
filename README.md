@@ -6,7 +6,11 @@ The repository contains an end-to-end local implementation of the connection, sc
 
 ## What is implemented
 
-- React dashboard shell and connection manager
+- React dashboard shell, connection manager, and an administrator management panel
+- Light and dark themes, following the operating system by default and remembered per browser
+- A persistent sticky header on every signed-in page, carrying the Home link, the theme control and the account menu
+- Administrator and client roles, with per-query data isolation so a client only ever reaches their own endpoints, tables and rows
+- Per-account dashboards built from one `GET /dashboard` call, shaped by role and filled from what the account owns
 - Source, destination, and bidirectional endpoint roles
 - Personal access token and basic authentication support
 - AES-256-GCM credential encryption before PostgreSQL storage
@@ -28,29 +32,41 @@ The repository contains an end-to-end local implementation of the connection, sc
 
 ## Repository layout
 
+Frontend and backend are separated at the top level, and the separation is the
+point: `frontend/` depends on `shared/` and never on `backend/`, `backend/` never
+imports from `frontend/`, and `shared/` holds only the request and response shapes
+both sides have to agree on.
+
 ```text
-apps/
+frontend/         React and Vite dashboard — the browser app
+backend/
   api/            NestJS and Fastify control API
-  web/            React and Vite dashboard
   worker/         BullMQ synchronization worker
-packages/
-  contracts/      Shared API contracts and validation
   dhis2-client/   Version-aware DHIS2 HTTP adapter
-database/
-  migrations/     PostgreSQL control-plane migrations
+  database/
+    migrations/   PostgreSQL control-plane migrations
+shared/
+  contracts/      API contracts and validation, used by both sides
 ```
+
+They deploy independently: `Dockerfile` and `fly.toml` build `backend/api` only,
+and `frontend/` goes to Vercel. Configuration is split the same way — `backend/.env`
+holds the database URL, the encryption key and the token secret; `frontend/.env`
+holds only `VITE_API_URL`. There is no root `.env`, so a frontend build has no path
+to backend configuration at all.
 
 ## Local setup
 
 Requirements: Node.js 22 or newer, pnpm 11, and Docker.
 
-1. Create the local environment file:
+1. Create the local environment files — one per side, and there is no root `.env`:
 
    ```bash
-   cp .env.example .env
+   cp backend/.env.example backend/.env      # database URL, keys, token secret
+   cp frontend/.env.example frontend/.env    # VITE_API_URL only
    ```
 
-2. Generate an encryption key and put it in `CONNECTION_ENCRYPTION_KEY`:
+2. Generate an encryption key and put it in `backend/.env` as `CONNECTION_ENCRYPTION_KEY`:
 
    ```bash
    openssl rand -base64 32
@@ -113,8 +129,10 @@ database — `fly proxy` forwards it to a local port:
 fly proxy 15432:5432 -a dhis2api-db   # leave running in one terminal
 psql "postgresql://postgres:PASSWORD@localhost:15432/dhis2api" \
   -v ON_ERROR_STOP=1 \
-  -f database/migrations/001_control_plane.sql \
-  -f database/migrations/002_auth.sql
+  -f backend/database/migrations/001_control_plane.sql \
+  -f backend/database/migrations/002_auth.sql \
+  -f backend/database/migrations/003_users_rbac.sql \
+  -f backend/database/migrations/004_client_role.sql
 ```
 
 Then open the dashboard and sign up — the first account on an empty `users` table
@@ -123,7 +141,7 @@ under a different key cannot be carried over.
 
 **Keep this at exactly one machine.** Overlap between scheduled runs is prevented
 by an in-memory set, so a second machine double-runs every schedule against the
-same tables. `fly scale count 1`, and move execution into `apps/worker` before
+same tables. `fly scale count 1`, and move execution into `backend/worker` before
 scaling out.
 
 The image builds and runs locally too, which is the quickest way to check a change
@@ -133,7 +151,7 @@ before deploying:
 docker build -t dhis2api:local .
 docker run --rm -p 4100:4000 --network dhis2api_default \
   -e DATABASE_URL="postgresql://dhis_sync:dhis_sync@postgres:5432/dhis_sync" \
-  -e CONNECTION_ENCRYPTION_KEY="$(grep '^CONNECTION_ENCRYPTION_KEY=' .env | cut -d= -f2-)" \
+  -e CONNECTION_ENCRYPTION_KEY="$(grep '^CONNECTION_ENCRYPTION_KEY=' backend/.env | cut -d= -f2-)" \
   -e AUTH_JWT_SECRET="$(openssl rand -base64 48)" \
   dhis2api:local
 ```
@@ -143,8 +161,8 @@ docker run --rm -p 4100:4000 --network dhis2api_default \
 The Vite dashboard and NestJS API are separate services. Deploying the dashboard
 does not start the API, PostgreSQL, or the background scheduler.
 
-1. Deploy `apps/api` on a persistent host — see the Fly.io section above — with the
-   backend environment variables from `.env.example` and a reachable PostgreSQL.
+1. Deploy `backend/api` on a persistent host — see the Fly.io section above — with the
+   backend environment variables from `backend/.env.example` and a reachable PostgreSQL.
 2. Verify `https://YOUR_BACKEND_HOST/api/v1/health` responds successfully.
 3. On the backend, set `WEB_ORIGIN=https://YOUR_FRONTEND_HOST` (no trailing slash)
    and restart it so CORS allows your frontend's exact origin.
@@ -175,6 +193,9 @@ Secrets are never included in an API response. The current implementation intent
 
 | Area | Routes |
 | --- | --- |
+| Dashboard | `GET /dashboard` — one route, shaped by the caller's role and filled only with rows they own |
+| Accounts | `PUT /users/me/profile`, `POST /users/me/password` (any account); `GET/POST /users`, `GET/PUT /users/:id`, `DELETE /users/:id?confirm=<email>` (admin) |
+| Endpoint ownership | `PUT /connections/:id/owner` (admin) — hand an endpoint to a client, or take it back with `null` |
 | Metadata | `GET /metadata/connections/:id/resources`, `POST /metadata/discover` |
 | Schemas | `GET/POST /schema-blueprints`, `POST /schema-blueprints/:id/apply`, `DELETE /schema-blueprints/:id/table`, `DELETE /schema-blueprints/:id/blueprint` |
 | Sync | `GET/POST /sync-definitions`, `POST /sync-definitions/:id/run`, `PUT/DELETE /sync-definitions/:id/schedule`, `DELETE /sync-definitions/:id/runs`, `DELETE /sync-definitions/:id` |
@@ -182,6 +203,59 @@ Secrets are never included in an API response. The current implementation intent
 | Backups | `GET /backups/configuration.json`, `GET /backups/:id/years`, `GET /backups/:id/data.json`, `GET /backups/:id/data.csv` |
 
 All paths above are below `/api/v1`.
+
+### Roles and data isolation
+
+There are two roles. The **first account created on an empty `users` table becomes
+the administrator**; every account after that is a **client**, and an administrator
+creates them by hand from the management panel.
+
+| | Administrator | Client |
+| --- | --- | --- |
+| Sees | the whole control plane | only what they own |
+| Accounts | create, edit, deactivate, delete | their own profile and password |
+| Endpoints | all, and decides who owns each | only theirs, and may add their own |
+| Tables, syncs, reports, backups | all | only those built from their endpoints |
+| Destructive actions | yes | no |
+
+Isolation is enforced per query on the API, not in the UI. Each request carries an
+`AccessScope`: an administrator's owner filter is `null` and lifts the restriction,
+a client's is their account id and is bound into every read — connections,
+blueprints, syncs, reports and their CSV exports, every table in a configuration
+backup, and every number on the dashboard.
+
+Reaching for another account's row by id returns **404, not 403**. That is
+deliberate: a 403 would confirm the row exists, which would let anyone enumerate
+other accounts' data by guessing UUIDs.
+
+One structural limit: a data table's name is derived from the DHIS2 resource it
+came from, so two accounts pointed at the same DHIS2 server would generate the
+same physical table. Rather than let them silently share rows, generating a
+blueprint for a table another account already owns is refused with a `409` naming
+that owner.
+
+### Deleting things
+
+Every destructive route is reserved for `admin` and takes `?confirm=<name>` — the
+entity's own name, or the account's email, typed back exactly. The response says
+what else went with it (`cascaded`) and what survived with a null reference
+(`orphaned`), so nothing is removed that the caller did not see coming:
+
+- A **connection** is refused while any sync definition or blueprint still uses
+  it, and the refusal names them. Only its metadata snapshots go with it.
+- A **data table** is refused while sync definitions write into it, unless
+  `&cascade=true`, and always while one of those syncs is mid-run. The
+  dependency check runs inside the dropping transaction, so a sync created a
+  moment earlier cannot be swept away unannounced.
+- A **blueprint** cannot be deleted while its table is applied — drop the table
+  first, as a separate, separately confirmed action.
+- **Run history** keeps the rows of runs still queued or running, which would
+  otherwise finish into a row that no longer exists.
+- An **account** never cascades into the control plane it built: connections,
+  blueprints and syncs survive with `created_by` set to null, and the audit trail
+  keeps the actor's name after the account is gone. The last active administrator
+  cannot be deleted, demoted or deactivated, and nobody can do any of those to
+  their own account.
 
 ## DHIS2 access requirements
 
@@ -208,13 +282,20 @@ pnpm test
 pnpm build
 ```
 
+`backend/api/src/common/isolation.test.ts` is the one to keep green when adding a
+read surface: it drives each service as a client against another account's rows
+and asserts the refusal, and asserts that report and backup reads bind the owner
+filter in SQL rather than filtering after the fact.
+
 ## Production hardening still recommended
 
 - Move scheduled execution entirely to BullMQ workers when deploying more than one API replica.
 - Move manual sync runs to the worker too: the endpoint holds the HTTP request open for the
   whole run, which a load balancer will eventually cut off on a large download.
-- Add a migration runner, so a deploy applies `database/migrations/*.sql` instead of an operator remembering to.
-- Add user management screens and audit-log viewers; `role` and `is_active` are enforced but only changeable via SQL, and there is no password reset.
+- Add a migration runner, so a deploy applies `backend/database/migrations/*.sql` instead of an operator remembering to.
+- Add an audit-log viewer; every destructive action is recorded in `audit_log`, but nothing reads it back except the caller's own recent activity on their dashboard.
+- Add password reset. An administrator can create an account with a temporary password and a user can change their own, but nobody can reset someone else's.
+- Consider per-owner data table names. Ownership is enforced on every query, but two accounts pointed at the same DHIS2 server would generate the same physical table; that collision is currently refused rather than accommodated.
 - Add incremental cursor-based pulls after validating the exact DHIS2 version and Program-specific update semantics.
 - Add object-storage targets and retention policies for large backups.
 - Keep deterministic generation as the authority; if an LLM is added for label or type suggestions, require explicit review before applying DDL.

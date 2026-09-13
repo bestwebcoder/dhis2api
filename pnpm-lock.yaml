@@ -8,14 +8,14 @@ importers:
 
   .: {}
 
-  apps/api:
+  backend/api:
     dependencies:
       '@dhis-sync/contracts':
         specifier: workspace:*
-        version: link:../../packages/contracts
+        version: link:../../shared/contracts
       '@dhis-sync/dhis2-client':
         specifier: workspace:*
-        version: link:../../packages/dhis2-client
+        version: link:../dhis2-client
       '@nestjs/common':
         specifier: 12.0.1
         version: 12.0.1(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -66,11 +66,52 @@ importers:
         specifier: 4.0.18
         version: 4.0.18(@types/node@25.5.0)(lightningcss@1.33.0)(tsx@4.21.0)
 
-  apps/web:
+  backend/dhis2-client:
     dependencies:
       '@dhis-sync/contracts':
         specifier: workspace:*
-        version: link:../../packages/contracts
+        version: link:../../shared/contracts
+    devDependencies:
+      '@types/node':
+        specifier: 25.5.0
+        version: 25.5.0
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 4.0.18
+        version: 4.0.18(@types/node@25.5.0)(lightningcss@1.33.0)(tsx@4.21.0)
+
+  backend/worker:
+    dependencies:
+      bullmq:
+        specifier: 6.3.3
+        version: 6.3.3(ioredis@5.9.3)(pg@8.23.0)
+      dotenv:
+        specifier: 17.3.1
+        version: 17.3.1
+      ioredis:
+        specifier: 5.9.3
+        version: 5.9.3
+    devDependencies:
+      '@types/node':
+        specifier: 25.5.0
+        version: 25.5.0
+      tsx:
+        specifier: 4.21.0
+        version: 4.21.0
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 4.0.18
+        version: 4.0.18(@types/node@25.5.0)(lightningcss@1.33.0)(tsx@4.21.0)
+
+  frontend:
+    dependencies:
+      '@dhis-sync/contracts':
+        specifier: workspace:*
+        version: link:../shared/contracts
       react:
         specifier: 19.2.8
         version: 19.2.8
@@ -97,53 +138,12 @@ importers:
         specifier: 4.0.18
         version: 4.0.18(@types/node@25.5.0)(lightningcss@1.33.0)(tsx@4.21.0)
 
-  apps/worker:
-    dependencies:
-      bullmq:
-        specifier: 6.3.3
-        version: 6.3.3(ioredis@5.9.3)(pg@8.23.0)
-      dotenv:
-        specifier: 17.3.1
-        version: 17.3.1
-      ioredis:
-        specifier: 5.9.3
-        version: 5.9.3
-    devDependencies:
-      '@types/node':
-        specifier: 25.5.0
-        version: 25.5.0
-      tsx:
-        specifier: 4.21.0
-        version: 4.21.0
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: 4.0.18
-        version: 4.0.18(@types/node@25.5.0)(lightningcss@1.33.0)(tsx@4.21.0)
-
-  packages/contracts:
+  shared/contracts:
     dependencies:
       zod:
         specifier: 4.5.4
         version: 4.5.4
     devDependencies:
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: 4.0.18
-        version: 4.0.18(@types/node@25.5.0)(lightningcss@1.33.0)(tsx@4.21.0)
-
-  packages/dhis2-client:
-    dependencies:
-      '@dhis-sync/contracts':
-        specifier: workspace:*
-        version: link:../contracts
-    devDependencies:
-      '@types/node':
-        specifier: 25.5.0
-        version: 25.5.0
       typescript:
         specifier: 7.0.2
         version: 7.0.2

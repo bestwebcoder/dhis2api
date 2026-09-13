@@ -1,0 +1,160 @@
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import type {
+  AuthUser,
+  ChangePasswordInput,
+  CreateUserInput,
+  DeletionResult,
+  UpdateProfileInput,
+  UpdateUserInput,
+  UserSummary
+} from "@dhis-sync/contracts";
+import { PasswordService } from "../auth/password.service.js";
+import { UserRepository, type StoredUser, type UserWriteOutcome } from "../auth/user.repository.js";
+import { AuditService } from "../common/audit.service.js";
+import { requireConfirmation, summarise } from "../common/deletion.js";
+
+const UNIQUE_VIOLATION = "23505";
+
+/**
+ * The control plane cannot be left without an administrator, and an
+ * administrator cannot remove their own access by accident. Both rules produce
+ * the same advice: ask someone else, or deactivate instead of deleting.
+ */
+const LAST_ADMIN = "This is the only active administrator. Promote another account first, or the control plane would be left with nobody who can manage it.";
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @Inject(UserRepository) private readonly users: UserRepository,
+    @Inject(PasswordService) private readonly passwords: PasswordService,
+    @Inject(AuditService) private readonly audit: AuditService
+  ) {}
+
+  list(): Promise<UserSummary[]> {
+    return this.users.list();
+  }
+
+  async find(id: string): Promise<UserSummary> {
+    const user = await this.users.summaryById(id);
+    if (!user) throw new NotFoundException("Account not found");
+    return user;
+  }
+
+  /**
+   * Provisioning by an administrator, which is deliberately not subject to
+   * AUTH_ALLOW_SIGNUP: closing self-service sign-up is what makes this the way
+   * accounts are created, and the role is chosen here rather than inferred.
+   */
+  async create(input: CreateUserInput, actor: AuthUser): Promise<UserSummary> {
+    const passwordHash = await this.passwords.hash(input.password);
+    let created: StoredUser;
+    try {
+      created = await this.users.insert({
+        name: input.name,
+        email: input.email,
+        organisation: input.organisation.trim() || "Unassigned",
+        role: input.role,
+        passwordHash,
+        createdBy: actor.id
+      });
+    } catch (cause) {
+      if (typeof cause === "object" && cause !== null && (cause as { code?: string }).code === UNIQUE_VIOLATION) {
+        throw new ConflictException("An account already uses that email.");
+      }
+      throw cause;
+    }
+    await this.audit.record({
+      actor,
+      action: "user.create",
+      entityType: "user",
+      entityId: created.id,
+      after: { email: created.email, role: created.role, organisation: created.organisation }
+    });
+    return this.find(created.id);
+  }
+
+  async update(id: string, input: UpdateUserInput, actor: AuthUser): Promise<UserSummary> {
+    const before = await this.users.findById(id);
+    if (!before) throw new NotFoundException("Account not found");
+    if (id === actor.id && (input.role !== before.role || !input.isActive)) {
+      // an admin demoting or disabling themselves locks the door behind them
+      throw new ForbiddenException("You cannot change your own role or deactivate your own account. Ask another administrator.");
+    }
+    const result = await this.users.updateAsAdmin(id, {
+      name: input.name,
+      organisation: input.organisation.trim() || "Unassigned",
+      role: input.role,
+      isActive: input.isActive
+    });
+    this.assertWritten(result.outcome);
+    await this.audit.record({
+      actor,
+      action: "user.update",
+      entityType: "user",
+      entityId: id,
+      before: { role: before.role, isActive: before.isActive, organisation: before.organisation },
+      after: { role: input.role, isActive: input.isActive, organisation: input.organisation }
+    });
+    return this.find(id);
+  }
+
+  /**
+   * Deleting an account is confirmed with its email rather than its name: two
+   * people can share a name, and the confirmation has to name exactly one row.
+   */
+  async remove(id: string, confirmation: unknown, actor: AuthUser): Promise<DeletionResult> {
+    const before = await this.users.findById(id);
+    if (!before) throw new NotFoundException("Account not found");
+    requireConfirmation(confirmation, before.email, "account");
+    if (id === actor.id) {
+      throw new ForbiddenException("You cannot delete the account you are signed in with. Ask another administrator.");
+    }
+    const result = await this.users.remove(id);
+    this.assertWritten(result.outcome);
+    await this.audit.record({
+      actor,
+      action: "user.delete",
+      entityType: "user",
+      entityId: id,
+      before: { email: before.email, name: before.name, role: before.role, organisation: before.organisation }
+    });
+    return {
+      deleted: true,
+      cascaded: {},
+      // the account's work outlives it; created_by simply becomes null
+      orphaned: summarise({
+        connections: result.orphaned.connections,
+        "schema blueprints": result.orphaned.blueprints,
+        "sync definitions": result.orphaned.syncDefinitions
+      })
+    };
+  }
+
+  async updateOwnProfile(actor: AuthUser, input: UpdateProfileInput): Promise<UserSummary> {
+    const updated = await this.users.updateProfile(actor.id, {
+      name: input.name,
+      organisation: input.organisation.trim() || "Unassigned"
+    });
+    if (!updated) throw new NotFoundException("Your account no longer exists. Sign in again.");
+    return this.find(actor.id);
+  }
+
+  async changeOwnPassword(actor: AuthUser, input: ChangePasswordInput): Promise<{ updated: true }> {
+    const stored = await this.users.findById(actor.id);
+    if (!stored) throw new NotFoundException("Your account no longer exists. Sign in again.");
+    if (!await this.passwords.verify(input.currentPassword, stored.passwordHash)) {
+      throw new BadRequestException("Your current password is not correct.");
+    }
+    if (input.newPassword === input.currentPassword) {
+      throw new BadRequestException("Choose a password you are not already using.");
+    }
+    await this.users.updatePassword(actor.id, await this.passwords.hash(input.newPassword));
+    await this.audit.record({ actor, action: "user.password_change", entityType: "user", entityId: actor.id });
+    return { updated: true };
+  }
+
+  private assertWritten(outcome: UserWriteOutcome): void {
+    if (outcome === "not_found") throw new NotFoundException("Account not found");
+    if (outcome === "last_admin") throw new ConflictException(LAST_ADMIN);
+  }
+}
