@@ -27,6 +27,10 @@ async function bootstrap(): Promise<void> {
   app.enableCors({
     origin: [...localOrigins],
     credentials: true,
+    // @fastify/cors defaults to GET,HEAD,POST — unlike the Express `cors`
+    // package Nest's docs assume — so without this every PUT and DELETE from a
+    // browser fails its preflight, which is every edit and every deletion.
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
     exposedHeaders: ["Content-Disposition"]
   });
   app.enableShutdownHooks();
