@@ -190,11 +190,16 @@ export class UserRepository {
     return result.rows.at(0)?.last_login_at.toISOString() ?? null;
   }
 
-  /** Name and organisation only: a user cannot promote themselves or reopen their own account. */
-  async updateProfile(id: string, patch: { name: string; organisation: string }): Promise<StoredUser | null> {
+  /**
+   * The fields a user may change about themselves. Role and is_active are
+   * absent on purpose: nobody promotes themselves or reopens their own account.
+   * A duplicate email surfaces as a 23505 for the caller to translate.
+   */
+  async updateProfile(id: string, patch: { name: string; organisation: string; email: string }): Promise<StoredUser | null> {
     const result = await this.database.query<UserRow>(
-      `UPDATE users SET name = $2, organisation = $3, updated_at = now() WHERE id = $1 RETURNING ${columns}`,
-      [id, patch.name, patch.organisation]
+      `UPDATE users SET name = $2, organisation = $3, email = $4, updated_at = now()
+       WHERE id = $1 RETURNING ${columns}`,
+      [id, patch.name, patch.organisation, patch.email]
     );
     const row = result.rows.at(0);
     return row ? mapRow(row) : null;

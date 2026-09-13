@@ -194,8 +194,66 @@ describe("self service", () => {
 
   it("edits the caller's own row only, whatever id the body might carry", async () => {
     const updateProfile = vi.fn(async () => stored({ id: ADMIN_ID }));
-    const { service } = harness({ updateProfile, summaryById: async () => ({ ...summary(), id: ADMIN_ID }) });
-    await service.updateOwnProfile(actor, { name: "A. Yusuf", organisation: "" });
-    expect(updateProfile).toHaveBeenCalledWith(ADMIN_ID, { name: "A. Yusuf", organisation: "Unassigned" });
+    const { service } = harness({
+      updateProfile,
+      findById: async () => stored({ id: ADMIN_ID, email: actor.email }),
+      summaryById: async () => ({ ...summary(), id: ADMIN_ID })
+    });
+    await service.updateOwnProfile(actor, { name: "A. Yusuf", organisation: "", email: actor.email });
+    expect(updateProfile).toHaveBeenCalledWith(ADMIN_ID, {
+      name: "A. Yusuf", organisation: "Unassigned", email: actor.email
+    });
+  });
+
+  it("returns the caller's own profile and never asks for an id", async () => {
+    const summaryById = vi.fn(async () => ({ ...summary(), id: ADMIN_ID }));
+    const { service } = harness({ summaryById });
+    const profile = await service.readOwnProfile(actor);
+    expect(summaryById).toHaveBeenCalledWith(ADMIN_ID);
+    expect(profile.id).toBe(ADMIN_ID);
+  });
+});
+
+describe("changing the email you sign in with", () => {
+  const own = (email: string) => stored({ id: ADMIN_ID, email, passwordHash: "hashed:correct-horse" });
+
+  it("costs the current password, because it moves the sign-in identity", async () => {
+    const updateProfile = vi.fn(async () => stored({ id: ADMIN_ID }));
+    const { service } = harness({ updateProfile, findById: async () => own(actor.email) });
+    await expect(service.updateOwnProfile(actor, {
+      name: "Amina Yusuf", organisation: "HMIS", email: "moved@elsewhere.gov"
+    })).rejects.toThrow(/Enter your current password/);
+    await expect(service.updateOwnProfile(actor, {
+      name: "Amina Yusuf", organisation: "HMIS", email: "moved@elsewhere.gov", currentPassword: "guess"
+    })).rejects.toThrow(/current password is not correct/);
+    expect(updateProfile).not.toHaveBeenCalled();
+  });
+
+  it("goes through once the password is right, and is recorded", async () => {
+    const updateProfile = vi.fn(async () => stored({ id: ADMIN_ID, email: "moved@elsewhere.gov" }));
+    const { service, record } = harness({ updateProfile, findById: async () => own(actor.email) });
+    await service.updateOwnProfile(actor, {
+      name: "Amina Yusuf", organisation: "HMIS", email: "moved@elsewhere.gov", currentPassword: "correct-horse"
+    });
+    expect(updateProfile).toHaveBeenCalledWith(ADMIN_ID, expect.objectContaining({ email: "moved@elsewhere.gov" }));
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ action: "user.change_email" }));
+  });
+
+  it("asks for nothing extra when the email is unchanged", async () => {
+    const updateProfile = vi.fn(async () => stored({ id: ADMIN_ID }));
+    const { service, record } = harness({ updateProfile, findById: async () => own(actor.email) });
+    await service.updateOwnProfile(actor, { name: "New Name", organisation: "HMIS", email: actor.email });
+    expect(updateProfile).toHaveBeenCalledOnce();
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it("reports an email another account already uses as a conflict", async () => {
+    const { service } = harness({
+      findById: async () => own(actor.email),
+      updateProfile: async () => { throw Object.assign(new Error("duplicate key"), { code: "23505" }); }
+    });
+    await expect(service.updateOwnProfile(actor, {
+      name: "Amina Yusuf", organisation: "HMIS", email: "taken@ministry.gov", currentPassword: "correct-horse"
+    })).rejects.toThrow(/already uses that email/);
   });
 });

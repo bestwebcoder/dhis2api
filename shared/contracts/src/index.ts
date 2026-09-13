@@ -335,9 +335,16 @@ export const UpdateUserSchema = z.object({
 });
 export type UpdateUserInput = z.infer<typeof UpdateUserSchema>;
 
+/**
+ * A user editing their own profile. Email is included because it is the
+ * identifier they sign in with, which is also why changing it costs a password:
+ * `currentPassword` is required only when the email actually differs.
+ */
 export const UpdateProfileSchema = z.object({
   name: z.string().trim().min(2).max(120),
-  organisation: z.string().trim().max(160).default("")
+  organisation: z.string().trim().max(160).default(""),
+  email: z.string().trim().toLowerCase().pipe(z.email()).pipe(z.string().max(254)),
+  currentPassword: z.string().max(200).optional()
 });
 export type UpdateProfileInput = z.infer<typeof UpdateProfileSchema>;
 

@@ -28,6 +28,13 @@ export class UsersController {
   constructor(@Inject(UsersService) private readonly users: UsersService) {}
 
   // ── self service: any signed-in account, limited to its own row ──────────
+  // these must stay above @Get(":id") / @Put(":id"): Nest matches in declaration
+  // order, so "me" would otherwise fall through to the admin-only id routes
+  @Get("me/profile")
+  readOwnProfile(@CurrentUser() user: AuthUser) {
+    return this.users.readOwnProfile(user);
+  }
+
   @Put("me/profile")
   updateOwnProfile(@CurrentUser() user: AuthUser, @Body() body: unknown) {
     return this.users.updateOwnProfile(user, parse<UpdateProfileInput>(UpdateProfileSchema, body));

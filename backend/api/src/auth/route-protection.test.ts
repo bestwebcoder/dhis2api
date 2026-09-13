@@ -72,7 +72,7 @@ describe("route protection", () => {
     const accountRoutes = routes().filter((route) => route.controller === "UsersController");
     // the self-service pair is the whole of what a signed-in client may reach
     const selfService = accountRoutes.filter((route) => !route.roles?.includes("admin")).map((route) => route.handler).sort();
-    expect(selfService).toEqual(["changeOwnPassword", "updateOwnProfile"]);
+    expect(selfService).toEqual(["changeOwnPassword", "readOwnProfile", "updateOwnProfile"]);
     expect(accountRoutes.length).toBeGreaterThan(selfService.length);
   });
 

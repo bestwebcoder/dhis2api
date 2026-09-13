@@ -130,12 +130,60 @@ export class UsersService {
     };
   }
 
+  /** The caller's own profile, including what they own. Never another account's. */
+  readOwnProfile(actor: AuthUser): Promise<UserSummary> {
+    return this.find(actor.id);
+  }
+
+  /**
+   * Editing your own profile. Name and organisation are free to change; the
+   * email is the credential you sign in with, so changing it costs the current
+   * password — otherwise an unattended session could quietly move the account
+   * to an address its owner does not control.
+   *
+   * The session survives a change of email: tokens carry the account id, and
+   * AuthGuard resolves the subject by id on every request.
+   */
   async updateOwnProfile(actor: AuthUser, input: UpdateProfileInput): Promise<UserSummary> {
-    const updated = await this.users.updateProfile(actor.id, {
-      name: input.name,
-      organisation: input.organisation.trim() || "Unassigned"
-    });
+    const stored = await this.users.findById(actor.id);
+    if (!stored) throw new NotFoundException("Your account no longer exists. Sign in again.");
+
+    const emailChanged = input.email !== stored.email;
+    if (emailChanged) {
+      if (!input.currentPassword) {
+        throw new BadRequestException("Enter your current password to change the email you sign in with.");
+      }
+      if (!await this.passwords.verify(input.currentPassword, stored.passwordHash)) {
+        throw new BadRequestException("Your current password is not correct.");
+      }
+    }
+
+    let updated: StoredUser | null;
+    try {
+      updated = await this.users.updateProfile(actor.id, {
+        name: input.name,
+        organisation: input.organisation.trim() || "Unassigned",
+        email: input.email
+      });
+    } catch (cause) {
+      if (typeof cause === "object" && cause !== null && (cause as { code?: string }).code === UNIQUE_VIOLATION) {
+        throw new ConflictException("An account already uses that email.");
+      }
+      throw cause;
+    }
     if (!updated) throw new NotFoundException("Your account no longer exists. Sign in again.");
+
+    // only worth an audit entry when the sign-in identity moved
+    if (emailChanged) {
+      await this.audit.record({
+        actor,
+        action: "user.change_email",
+        entityType: "user",
+        entityId: actor.id,
+        before: { email: stored.email },
+        after: { email: updated.email }
+      });
+    }
     return this.find(actor.id);
   }
 
