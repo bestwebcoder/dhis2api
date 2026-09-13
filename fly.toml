@@ -1,4 +1,8 @@
-# API only. apps/web stays on Vercel; apps/worker is still a stub.
+# fly.toml app configuration file generated for dhis2api on 2026-09-12T19:15:26Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
 app = 'dhis2api'
 primary_region = 'sin'
 
@@ -6,15 +10,13 @@ primary_region = 'sin'
   dockerfile = 'Dockerfile'
 
 [env]
-  NODE_ENV = 'production'
   API_PORT = '4000'
+  NODE_ENV = 'production'
 
 [http_service]
   internal_port = 4000
   force_https = true
-  # SyncService polls for due schedules every 5s in-process, so the machine has
-  # to stay resident. Letting Fly stop it on idle would silently stop scheduling.
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
@@ -28,12 +30,7 @@ primary_region = 'sin'
 
 [[vm]]
   size = 'shared-cpu-1x'
-  # tracker syncs buffer a page of records at a time and scrypt costs 32MB per
-  # sign-in; 512mb is enough to boot but tight for a large download
   memory = '1gb'
+  cpu_kind = 'shared'
   cpus = 1
-
-# DO NOT run more than one machine. Overlap between scheduled runs is prevented
-# by an in-memory set (sync.service.ts runningDefinitions), so a second machine
-# would double-run every schedule against the same tables. Scaling out requires
-# moving execution into apps/worker first.
+  memory_mb = 1024
