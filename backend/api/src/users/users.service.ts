@@ -4,10 +4,12 @@ import type {
   ChangePasswordInput,
   CreateUserInput,
   DeletionResult,
+  GoogleAuthInput,
   UpdateProfileInput,
   UpdateUserInput,
   UserSummary
 } from "@dhis-sync/contracts";
+import { GoogleOAuthService } from "../auth/google-oauth.service.js";
 import { PasswordService } from "../auth/password.service.js";
 import { UserRepository, type StoredUser, type UserWriteOutcome } from "../auth/user.repository.js";
 import { AuditService } from "../common/audit.service.js";
@@ -27,7 +29,8 @@ export class UsersService {
   constructor(
     @Inject(UserRepository) private readonly users: UserRepository,
     @Inject(PasswordService) private readonly passwords: PasswordService,
-    @Inject(AuditService) private readonly audit: AuditService
+    @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(GoogleOAuthService) private readonly google: GoogleOAuthService
   ) {}
 
   list(): Promise<UserSummary[]> {
@@ -150,6 +153,9 @@ export class UsersService {
 
     const emailChanged = input.email !== stored.email;
     if (emailChanged) {
+      if (stored.passwordHash === null) {
+        throw new BadRequestException("Your account signs in with Google and has no password to confirm a new email with. Ask an administrator to change it.");
+      }
       if (!input.currentPassword) {
         throw new BadRequestException("Enter your current password to change the email you sign in with.");
       }
@@ -190,6 +196,9 @@ export class UsersService {
   async changeOwnPassword(actor: AuthUser, input: ChangePasswordInput): Promise<{ updated: true }> {
     const stored = await this.users.findById(actor.id);
     if (!stored) throw new NotFoundException("Your account no longer exists. Sign in again.");
+    if (stored.passwordHash === null) {
+      throw new BadRequestException("Your account signs in with Google and has no password to change.");
+    }
     if (!await this.passwords.verify(input.currentPassword, stored.passwordHash)) {
       throw new BadRequestException("Your current password is not correct.");
     }
@@ -199,6 +208,54 @@ export class UsersService {
     await this.users.updatePassword(actor.id, await this.passwords.hash(input.newPassword));
     await this.audit.record({ actor, action: "user.password_change", entityType: "user", entityId: actor.id });
     return { updated: true };
+  }
+
+  /**
+   * Adds Google as a way into the caller's own account. The Google account's
+   * verified email must be the account's email: a signed-in session alone is
+   * not enough, or anyone at an unattended desk could attach their own Google
+   * account and keep a way in after the owner changes their password. Matching
+   * the address means only the owner of that mailbox can ever link it.
+   */
+  async linkGoogle(actor: AuthUser, input: GoogleAuthInput): Promise<UserSummary> {
+    const identity = await this.google.exchange(input);
+    const stored = await this.users.findById(actor.id);
+    if (!stored) throw new NotFoundException("Your account no longer exists. Sign in again.");
+    if (stored.googleSubject === identity.subject) return this.find(actor.id);
+    if (stored.googleSubject !== null) {
+      throw new ConflictException("Your account is already connected to a different Google account. Disconnect it first.");
+    }
+    if (identity.email !== stored.email) {
+      throw new BadRequestException(
+        `That Google account is ${identity.email}, but you sign in here as ${stored.email}. Choose the Google account with the same address.`
+      );
+    }
+    let linked: boolean;
+    try {
+      linked = await this.users.linkGoogle(actor.id, identity.subject);
+    } catch (cause) {
+      if (typeof cause === "object" && cause !== null && (cause as { code?: string }).code === UNIQUE_VIOLATION) {
+        throw new ConflictException("That Google account is already connected to another account on this hub.");
+      }
+      throw cause;
+    }
+    if (!linked) {
+      throw new ConflictException("Your account is already connected to a different Google account. Disconnect it first.");
+    }
+    await this.audit.record({ actor, action: "user.google_link", entityType: "user", entityId: actor.id, after: { googleEmail: identity.email } });
+    return this.find(actor.id);
+  }
+
+  async unlinkGoogle(actor: AuthUser): Promise<UserSummary> {
+    const stored = await this.users.findById(actor.id);
+    if (!stored) throw new NotFoundException("Your account no longer exists. Sign in again.");
+    if (stored.googleSubject === null) return this.find(actor.id);
+    // the repository re-checks the password in the UPDATE itself; this is the readable refusal
+    if (stored.passwordHash === null || !await this.users.unlinkGoogle(actor.id)) {
+      throw new BadRequestException("Google is the only way into this account, so it cannot be disconnected.");
+    }
+    await this.audit.record({ actor, action: "user.google_unlink", entityType: "user", entityId: actor.id });
+    return this.find(actor.id);
   }
 
   private assertWritten(outcome: UserWriteOutcome): void {

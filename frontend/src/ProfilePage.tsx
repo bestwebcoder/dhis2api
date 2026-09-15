@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import type { AuthUser, UserSummary } from "@dhis-sync/contracts";
 import { userApi } from "./api.js";
+import type { ProfileMessage } from "./auth.js";
 import { ROLE_LABEL, useCurrentUser } from "./auth-context.js";
+import { beginGoogleFlow, googleSignInEnabled } from "./google-auth.js";
 
 const BLANK_PASSWORD = { currentPassword: "", newPassword: "", confirmPassword: "" };
 
@@ -14,14 +16,23 @@ function when(value: string | null): string {
  * /users/me/profile and goes back to /users/me/profile — there is no id in any
  * request, so this screen cannot be pointed at somebody else's account.
  */
-export function ProfilePage({ onProfileChange }: { onProfileChange: (user: AuthUser) => void }) {
+export function ProfilePage({ onProfileChange, initialMessage = null, onMessageShown }: {
+  onProfileChange: (user: AuthUser) => void;
+  /** The outcome of connecting Google, which lands here after the redirect back. */
+  initialMessage?: ProfileMessage | null;
+  onMessageShown?: () => void;
+}) {
   const currentUser = useCurrentUser();
   const [profile, setProfile] = useState<UserSummary | null>(null);
   const [details, setDetails] = useState({ name: "", organisation: "", email: "", currentPassword: "" });
   const [passwords, setPasswords] = useState(BLANK_PASSWORD);
   const [busy, setBusy] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialMessage?.tone === "error" ? initialMessage.text : null);
+  const [notice, setNotice] = useState<string | null>(initialMessage?.tone === "success" ? initialMessage.text : null);
+  const hasPassword = profile?.signInMethods.password ?? true;
+
+  // shown once: leaving and returning to the profile should not repeat it
+  useEffect(() => { if (initialMessage) onMessageShown?.(); }, []);
 
   // the email is what you sign in with, so the API asks for a password to move it
   const emailChanged = profile !== null && details.email.trim().toLowerCase() !== profile.email;
@@ -83,6 +94,28 @@ export function ProfilePage({ onProfileChange }: { onProfileChange: (user: AuthU
     }
   }
 
+  async function connectGoogle() {
+    setBusy("google"); setError(null); setNotice(null);
+    try {
+      await beginGoogleFlow("link");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not start connecting Google");
+      setBusy("");
+    }
+  }
+
+  async function disconnectGoogle() {
+    setBusy("google"); setError(null); setNotice(null);
+    try {
+      setProfile(await userApi.unlinkGoogle());
+      setNotice("Google was disconnected. Sign in with your email and password from now on.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not disconnect Google");
+    } finally {
+      setBusy("");
+    }
+  }
+
   const owned = profile ? profile.owns.connections + profile.owns.blueprints + profile.owns.syncDefinitions : 0;
 
   return (
@@ -133,8 +166,10 @@ export function ProfilePage({ onProfileChange }: { onProfileChange: (user: AuthU
               <input value={details.organisation} onChange={(e) => setDetails({ ...details, organisation: e.target.value })} placeholder="Unassigned" />
             </label>
             <label className="span-2"><span>Email</span>
-              <input required type="email" value={details.email} onChange={(e) => setDetails({ ...details, email: e.target.value })} />
-              <small>This is the address you sign in with. Changing it asks for your password.</small>
+              <input required type="email" value={details.email} readOnly={!hasPassword} onChange={(e) => setDetails({ ...details, email: e.target.value })} />
+              <small>{hasPassword
+                ? "This is the address you sign in with. Changing it asks for your password."
+                : "Your account signs in with Google and has no password to confirm a change, so this address is fixed."}</small>
             </label>
             {emailChanged && (
               <label className="span-2"><span>Current password</span>
@@ -156,7 +191,39 @@ export function ProfilePage({ onProfileChange }: { onProfileChange: (user: AuthU
         </form>
       </section>
 
-      <section className="panel form-panel">
+      {profile && (profile.signInMethods.google || googleSignInEnabled) && (
+        <section className="panel form-panel">
+          <div className="panel-heading">
+            <div><p className="step">Sign-in methods</p><h2>How you get in</h2></div>
+            <span className="secure-note">Linked by Google's permanent account ID, not by email</span>
+          </div>
+          <ul className="signin-methods">
+            <li>
+              <div><strong>Email and password</strong>
+                <small>{profile.signInMethods.password ? `Sign in as ${profile.email}.` : "Not set. This account signs in with Google only."}</small>
+              </div>
+            </li>
+            <li>
+              <div><strong>Google</strong>
+                <small>{profile.signInMethods.google
+                  ? profile.signInMethods.password
+                    ? "Connected."
+                    : "Connected. It is the only way into this account, so it cannot be disconnected."
+                  : `Connect the Google account for ${profile.email} to sign in without a password.`}</small>
+              </div>
+              {profile.signInMethods.google
+                ? profile.signInMethods.password && <button type="button" className="button button--quiet" disabled={Boolean(busy)} onClick={() => void disconnectGoogle()}>
+                  {busy === "google" ? "Disconnecting…" : "Disconnect"}
+                </button>
+                : <button type="button" className="button button--quiet" disabled={Boolean(busy)} onClick={() => void connectGoogle()}>
+                  {busy === "google" ? "Opening Google…" : "Connect Google"}
+                </button>}
+            </li>
+          </ul>
+        </section>
+      )}
+
+      {hasPassword && <section className="panel form-panel">
         <div className="panel-heading">
           <div><p className="step">Security</p><h2>Change your password</h2></div>
           <span className="secure-note">Stored as a scrypt hash, never in the clear</span>
@@ -183,7 +250,7 @@ export function ProfilePage({ onProfileChange }: { onProfileChange: (user: AuthU
             </button>
           </div>
         </form>
-      </section>
+      </section>}
     </main>
   );
 }

@@ -11,6 +11,7 @@ import type {
   DeletionResult,
   Dhis2ResourceSummary,
   GenerateBlueprintInput,
+  GoogleAuthInput,
   ReportDefinitionSummary,
   RunHistoryClearResult,
   ReportPage,
@@ -165,6 +166,7 @@ export const reportApi = {
 export const authApi = {
   register: (input: SignUpInput) => request<AuthSession>("/auth/register", { method: "POST", body: JSON.stringify(input) }),
   login: (input: SignInInput) => request<AuthSession>("/auth/login", { method: "POST", body: JSON.stringify(input) }),
+  google: (input: GoogleAuthInput) => request<AuthSession>("/auth/google", { method: "POST", body: JSON.stringify(input) }),
   me: () => request<AuthUser>("/auth/me")
 };
 
@@ -189,5 +191,7 @@ export const userApi = {
   updateOwnProfile: (input: UpdateProfileInput) => request<UserSummary>("/users/me/profile", { method: "PUT", body: JSON.stringify(input) }),
   changeOwnPassword: (input: ChangePasswordInput) => request<{ updated: true }>("/users/me/password", {
     method: "POST", body: JSON.stringify(input)
-  })
+  }),
+  linkGoogle: (input: GoogleAuthInput) => request<UserSummary>("/users/me/google", { method: "POST", body: JSON.stringify(input) }),
+  unlinkGoogle: () => request<UserSummary>("/users/me/google/unlink", { method: "POST" })
 };

@@ -10,8 +10,9 @@ import { Reports } from "./Reports.js";
 import { SchemaBuilder } from "./SchemaBuilder.js";
 import { SyncSchedules } from "./SyncSchedules.js";
 import { ThemeChoice, ThemeToggle } from "./ThemeToggle.js";
-import { hasStoredToken, initials, onSessionExpired, restoreSession, signOut, type AuthUser } from "./auth.js";
+import { hasStoredToken, initials, onSessionExpired, signOut, startSession, type AuthUser, type ProfileMessage } from "./auth.js";
 import { CurrentUserProvider, ROLE_LABEL } from "./auth-context.js";
+import { takeGoogleCallback } from "./google-auth.js";
 import { useTheme } from "./theme.js";
 
 type Page = "overview" | "connections" | "schema" | "sync" | "reports" | "backups" | "admin" | "profile";
@@ -33,9 +34,13 @@ const navigation: { id: Page; icon: string; label: string; adminOnly?: true }[] 
 
 export function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
+  // read before anything renders, so Google's code leaves the address bar at once
+  const [googleCallback] = useState(takeGoogleCallback);
   // a stored token is only a hint; the API decides, so hold the shell until /auth/me answers
-  const [restoring, setRestoring] = useState(() => hasStoredToken());
+  const [restoring, setRestoring] = useState(() => googleCallback !== null || hasStoredToken());
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [profileMessage, setProfileMessage] = useState<ProfileMessage | null>(null);
   const [page, setPage] = useState<Page>("overview");
   const isAdmin = user?.role === "admin";
   const pages = navigation.filter((item) => isAdmin || !item.adminOnly);
@@ -47,9 +52,15 @@ export function App() {
   useEffect(() => {
     if (!restoring) return;
     let cancelled = false;
-    void restoreSession().then((restored) => { if (!cancelled) { setUser(restored); setRestoring(false); } });
+    void startSession(googleCallback).then((start) => {
+      if (cancelled) return;
+      setUser(start.user);
+      if (start.signInError) { setAuthError(start.signInError); setAuthMode("signin"); }
+      if (start.profileMessage) { setProfileMessage(start.profileMessage); setPage("profile"); }
+      setRestoring(false);
+    });
     return () => { cancelled = true; };
-  }, [restoring]);
+  }, [restoring, googleCallback]);
 
   // the API rejected our token mid-session: fall back to signed-out
   useEffect(() => onSessionExpired(() => { setUser(null); setAccountOpen(false); setMobileOpen(false); }), []);
@@ -64,18 +75,25 @@ export function App() {
   const onAuthenticated = (authenticated: AuthUser) => {
     setUser(authenticated);
     setAuthMode(null);
+    setAuthError(null);
     setPage("overview");
     window.scrollTo({ top: 0 });
   };
 
   const endSession = () => { signOut(); setUser(null); setAccountOpen(false); setMobileOpen(false); };
 
-  if (restoring) return <div className="session-restore" role="status"><span className="brand-mark">D2</span><p>Restoring your session…</p></div>;
+  if (restoring) return <div className="session-restore" role="status"><span className="brand-mark">D2</span><p>{googleCallback ? "Finishing Google sign-in…" : "Restoring your session…"}</p></div>;
 
   if (!user) return <>
     <a className="skip-link" href="#main-content">Skip to main content</a>
     <LandingPage onAuth={setAuthMode} />
-    {authMode && <AuthDialog mode={authMode} onModeChange={setAuthMode} onClose={() => setAuthMode(null)} onAuthenticated={onAuthenticated} />}
+    {authMode && <AuthDialog
+      mode={authMode}
+      initialError={authError}
+      onModeChange={(mode) => { setAuthError(null); setAuthMode(mode); }}
+      onClose={() => { setAuthError(null); setAuthMode(null); }}
+      onAuthenticated={onAuthenticated}
+    />}
   </>;
 
   return <div className="app-shell">
@@ -121,7 +139,7 @@ export function App() {
         {page === "reports" && <Reports />}
         {page === "backups" && <Backups navigate={(target) => navigate(target as Page)} />}
         {page === "admin" && isAdmin && <AdminPanel />}
-        {page === "profile" && <ProfilePage onProfileChange={setUser} />}
+        {page === "profile" && <ProfilePage onProfileChange={setUser} initialMessage={profileMessage} onMessageShown={() => setProfileMessage(null)} />}
       </CurrentUserProvider>
     </div>
   </div>;

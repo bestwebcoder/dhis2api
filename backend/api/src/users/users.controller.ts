@@ -2,11 +2,13 @@ import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Inject, P
 import {
   ChangePasswordSchema,
   CreateUserSchema,
+  GoogleAuthSchema,
   UpdateProfileSchema,
   UpdateUserSchema,
   type AuthUser,
   type ChangePasswordInput,
   type CreateUserInput,
+  type GoogleAuthInput,
   type UpdateProfileInput,
   type UpdateUserInput
 } from "@dhis-sync/contracts";
@@ -44,6 +46,20 @@ export class UsersController {
   @HttpCode(200)
   changeOwnPassword(@CurrentUser() user: AuthUser, @Body() body: unknown) {
     return this.users.changeOwnPassword(user, parse<ChangePasswordInput>(ChangePasswordSchema, body));
+  }
+
+  @Post("me/google")
+  @HttpCode(200)
+  linkGoogle(@CurrentUser() user: AuthUser, @Body() body: unknown) {
+    return this.users.linkGoogle(user, parse<GoogleAuthInput>(GoogleAuthSchema, body));
+  }
+
+  // a POST rather than a DELETE: every DELETE route is admin-only, and removing
+  // your own sign-in method destroys nothing in the control plane
+  @Post("me/google/unlink")
+  @HttpCode(200)
+  unlinkGoogle(@CurrentUser() user: AuthUser) {
+    return this.users.unlinkGoogle(user);
   }
 
   // ── administration: managing other people's access ───────────────────────

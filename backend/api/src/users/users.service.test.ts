@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { AuthUser, UserRole, UserSummary } from "@dhis-sync/contracts";
 import type { AuditService } from "../common/audit.service.js";
+import type { GoogleIdentity, GoogleOAuthService } from "../auth/google-oauth.service.js";
 import { PasswordService } from "../auth/password.service.js";
 import type { StoredUser, UserRepository } from "../auth/user.repository.js";
 import { UsersService } from "./users.service.js";
@@ -33,6 +34,7 @@ const stored = (overrides: Partial<StoredUser> = {}): StoredUser => ({
   lastLoginAt: null,
   createdAt: "2026-09-02T00:00:00.000Z",
   passwordHash: "scrypt$32768$8$1$c2FsdA==$a2V5",
+  googleSubject: null,
   isActive: true,
   ...overrides
 });
@@ -47,8 +49,12 @@ const summary = (role: UserRole = "client"): UserSummary => ({
   createdAt: "2026-09-02T00:00:00.000Z",
   isActive: true,
   createdByName: "Amina Yusuf",
-  owns: { connections: 0, blueprints: 0, syncDefinitions: 0 }
+  owns: { connections: 0, blueprints: 0, syncDefinitions: 0 },
+  signInMethods: { password: true, google: false }
 });
+
+const googleInput = { code: "4/0AbCdEf-one-time-code", codeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", redirectUri: "http://localhost:5173/" };
+const googleFor = (email: string): GoogleIdentity => ({ subject: "109876543210987654321", email, name: "Amina Yusuf" });
 
 /** A password service that does not pay scrypt's 160ms for tests that are not about hashing. */
 const fastPasswords = {
@@ -56,7 +62,11 @@ const fastPasswords = {
   verify: async (password: string, hash: string) => hash === `hashed:${password}`
 } as unknown as PasswordService;
 
-function harness(repository: Partial<UserRepository>, passwords: PasswordService = fastPasswords) {
+function harness(
+  repository: Partial<UserRepository>,
+  passwords: PasswordService = fastPasswords,
+  identity: GoogleIdentity = googleFor("amina@ministry.gov")
+) {
   const record = vi.fn(async () => undefined);
   const users = {
     list: async () => [],
@@ -68,11 +78,70 @@ function harness(repository: Partial<UserRepository>, passwords: PasswordService
     updatePassword: async () => true,
     updateAsAdmin: async () => ({ outcome: "ok" as const, user: stored() }),
     remove: async () => ({ outcome: "ok" as const, user: stored(), orphaned: { connections: 0, blueprints: 0, syncDefinitions: 0 } }),
+    linkGoogle: async () => true,
+    unlinkGoogle: async () => true,
     ...repository
   } as unknown as UserRepository;
-  const service = new UsersService(users, passwords, { record } as unknown as AuditService);
+  const google = { exchange: async () => identity } as unknown as GoogleOAuthService;
+  const service = new UsersService(users, passwords, { record } as unknown as AuditService, google);
   return { service, record };
 }
+
+describe("connecting Google to your own account", () => {
+  const own = (overrides: Partial<StoredUser> = {}) => stored({ id: ADMIN_ID, email: "amina@ministry.gov", ...overrides });
+
+  it("links the Google account that has the same verified email, and audits it", async () => {
+    const linkGoogle = vi.fn(async () => true);
+    const { service, record } = harness({ findById: async () => own(), linkGoogle });
+    await service.linkGoogle(actor, googleInput);
+    expect(linkGoogle).toHaveBeenCalledWith(ADMIN_ID, "109876543210987654321");
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ action: "user.google_link", entityId: ADMIN_ID }));
+  });
+
+  it("refuses a Google account with a different email, so a borrowed session cannot plant a way in", async () => {
+    const linkGoogle = vi.fn(async () => true);
+    const { service } = harness({ findById: async () => own(), linkGoogle }, fastPasswords, googleFor("intruder@gmail.com"));
+    await expect(service.linkGoogle(actor, googleInput)).rejects.toThrow(/same address/);
+    expect(linkGoogle).not.toHaveBeenCalled();
+  });
+
+  it("refuses a Google account already linked to someone else", async () => {
+    const { service } = harness({
+      findById: async () => own(),
+      linkGoogle: async () => { throw Object.assign(new Error("duplicate key"), { code: "23505" }); }
+    });
+    await expect(service.linkGoogle(actor, googleInput)).rejects.toThrow(/another account/);
+  });
+
+  it("will not replace a different Google account that is already connected", async () => {
+    const linkGoogle = vi.fn(async () => true);
+    const { service } = harness({ findById: async () => own({ googleSubject: "some-other-subject" }), linkGoogle });
+    await expect(service.linkGoogle(actor, googleInput)).rejects.toThrow(/Disconnect it first/);
+    expect(linkGoogle).not.toHaveBeenCalled();
+  });
+
+  it("disconnects Google from an account that still has a password", async () => {
+    const unlinkGoogle = vi.fn(async () => true);
+    const { service, record } = harness({ findById: async () => own({ googleSubject: "109876543210987654321" }), unlinkGoogle });
+    await service.unlinkGoogle(actor);
+    expect(unlinkGoogle).toHaveBeenCalledWith(ADMIN_ID);
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ action: "user.google_unlink" }));
+  });
+
+  it("never disconnects the only way into an account", async () => {
+    const unlinkGoogle = vi.fn(async () => true);
+    const { service } = harness({ findById: async () => own({ passwordHash: null, googleSubject: "109876543210987654321" }), unlinkGoogle });
+    await expect(service.unlinkGoogle(actor)).rejects.toThrow(/only way into this account/);
+    expect(unlinkGoogle).not.toHaveBeenCalled();
+  });
+
+  it("explains that a Google-only account has no password to change or to confirm an email with", async () => {
+    const googleOnly = own({ passwordHash: null, googleSubject: "109876543210987654321" });
+    const { service } = harness({ findById: async () => googleOnly });
+    await expect(service.changeOwnPassword(actor, { currentPassword: "guess", newPassword: "a-new-password" })).rejects.toThrow(/signs in with Google/);
+    await expect(service.updateOwnProfile(actor, { name: "Amina Yusuf", organisation: "HMIS Unit", email: "new@ministry.gov" })).rejects.toThrow(/signs in with Google/);
+  });
+});
 
 describe("provisioning accounts", () => {
   it("creates the account with the role the administrator chose and records who provisioned it", async () => {

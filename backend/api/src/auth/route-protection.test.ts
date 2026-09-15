@@ -63,16 +63,16 @@ describe("route protection", () => {
     expect(run?.roles).toEqual(["admin"]);
   });
 
-  it("keeps only sign-in, sign-up and health public", () => {
+  it("keeps only sign-in, sign-up (password or Google) and health public", () => {
     expect(routes().filter((route) => route.isPublic).map(describeRoute).sort())
-      .toEqual(["AuthController.login", "AuthController.register", "HealthController.health"]);
+      .toEqual(["AuthController.google", "AuthController.login", "AuthController.register", "HealthController.health"]);
   });
 
   it("reserves account administration for admins, and only account administration", () => {
     const accountRoutes = routes().filter((route) => route.controller === "UsersController");
     // the self-service pair is the whole of what a signed-in client may reach
     const selfService = accountRoutes.filter((route) => !route.roles?.includes("admin")).map((route) => route.handler).sort();
-    expect(selfService).toEqual(["changeOwnPassword", "readOwnProfile", "updateOwnProfile"]);
+    expect(selfService).toEqual(["changeOwnPassword", "linkGoogle", "readOwnProfile", "unlinkGoogle", "updateOwnProfile"]);
     expect(accountRoutes.length).toBeGreaterThan(selfService.length);
   });
 

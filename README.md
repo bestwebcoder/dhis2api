@@ -51,8 +51,8 @@ shared/
 
 They deploy independently: `Dockerfile` and `fly.toml` build `backend/api` only,
 and `frontend/` goes to Vercel. Configuration is split the same way — `backend/.env`
-holds the database URL, the encryption key and the token secret; `frontend/.env`
-holds only `VITE_API_URL`. There is no root `.env`, so a frontend build has no path
+holds the database URL, the encryption key, the token secret and the Google client
+secret; `frontend/.env` holds only public `VITE_` values. There is no root `.env`, so a frontend build has no path
 to backend configuration at all.
 
 ## Local setup
@@ -63,7 +63,7 @@ Requirements: Node.js 22 or newer, pnpm 11, and Docker.
 
    ```bash
    cp backend/.env.example backend/.env      # database URL, keys, token secret
-   cp frontend/.env.example frontend/.env    # VITE_API_URL only
+   cp frontend/.env.example frontend/.env    # VITE_API_URL, optional VITE_GOOGLE_CLIENT_ID
    ```
 
 2. Generate an encryption key and put it in `backend/.env` as `CONNECTION_ENCRYPTION_KEY`:
@@ -97,6 +97,33 @@ Requirements: Node.js 22 or newer, pnpm 11, and Docker.
 
 Open [http://localhost:5173](http://localhost:5173). The API health endpoint is [http://localhost:4000/api/v1/health](http://localhost:4000/api/v1/health).
 
+## Google sign-in (optional)
+
+Accounts can sign up and sign in with Google alongside email and password.
+
+1. In Google Cloud Console → APIs & Services → Credentials, create an **OAuth client
+   ID** of type **Web application**. Add each dashboard origin's root as an
+   *Authorised redirect URI* — exactly `http://localhost:5173/` and
+   `http://127.0.0.1:5173/` locally, and `https://YOUR_FRONTEND_HOST/` in production.
+   The consent screen needs only the `openid`, `email` and `profile` scopes.
+2. Put the client ID and secret in `backend/.env` as `GOOGLE_CLIENT_ID` and
+   `GOOGLE_CLIENT_SECRET`, and the same client ID in `frontend/.env` as
+   `VITE_GOOGLE_CLIENT_ID`. The secret never goes in the frontend.
+3. On an existing database, apply `005_google_identity.sql` by hand.
+
+How it works: the dashboard runs the authorization-code flow with PKCE and a `state`
+check, Google redirects back to the site root, and the API exchanges the code with
+the client secret and issues the hub's usual session token. Google's own tokens are
+discarded. Accounts are linked by Google's permanent account ID, not by email:
+
+- a Google account nobody has linked becomes a new account, under the same
+  `AUTH_ALLOW_SIGNUP` and first-account-is-admin rules as password sign-up;
+- if an account with that email already exists, sign-in is refused — sign in with
+  the password and use **Profile → Connect Google**, which requires the Google
+  account's verified email to match;
+- a Google-only account has no password, so it cannot change its email or
+  disconnect Google.
+
 ## API deployment (Fly.io)
 
 The API needs a **persistent** host: `SyncService` polls for due schedules every
@@ -116,6 +143,8 @@ fly secrets set \
   CONNECTION_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
   AUTH_JWT_SECRET="$(openssl rand -base64 48)" \
   WEB_ORIGIN="https://YOUR_FRONTEND_HOST"
+# optional, for Google sign-in:
+# fly secrets set GOOGLE_CLIENT_ID="..." GOOGLE_CLIENT_SECRET="..."
 
 fly deploy
 fly ssh console -C "true"            # then apply the schema, below
@@ -132,7 +161,8 @@ psql "postgresql://postgres:PASSWORD@localhost:15432/dhis2api" \
   -f backend/database/migrations/001_control_plane.sql \
   -f backend/database/migrations/002_auth.sql \
   -f backend/database/migrations/003_users_rbac.sql \
-  -f backend/database/migrations/004_client_role.sql
+  -f backend/database/migrations/004_client_role.sql \
+  -f backend/database/migrations/005_google_identity.sql
 ```
 
 Then open the dashboard and sign up — the first account on an empty `users` table
@@ -168,7 +198,8 @@ does not start the API, PostgreSQL, or the background scheduler.
    and restart it so CORS allows your frontend's exact origin.
 4. In the Vercel frontend project's Settings → Environment Variables, set
    `VITE_API_URL=https://YOUR_BACKEND_HOST/api/v1` for Production and, if used,
-   Preview. This is the hub backend URL, not a DHIS2 instance URL.
+   Preview. This is the hub backend URL, not a DHIS2 instance URL. For Google
+   sign-in, also set `VITE_GOOGLE_CLIENT_ID`.
 5. Redeploy the frontend. Vite embeds the API URL during the build; editing an
    environment variable does not update an existing deployment.
 

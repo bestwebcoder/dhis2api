@@ -11,7 +11,13 @@ const EnvironmentSchema = z.object({
   AUTH_ALLOW_SIGNUP: z
     .enum(["true", "false"])
     .default("true")
-    .transform((value) => value === "true")
+    .transform((value) => value === "true"),
+  // Google sign-in is enabled only when both are set; a blank line in .env counts as unset
+  GOOGLE_CLIENT_ID: z.string().trim().optional().transform((value) => value || undefined),
+  GOOGLE_CLIENT_SECRET: z.string().trim().optional().transform((value) => value || undefined)
+}).refine((config) => Boolean(config.GOOGLE_CLIENT_ID) === Boolean(config.GOOGLE_CLIENT_SECRET), {
+  message: "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET together, or leave both unset to disable Google sign-in",
+  path: ["GOOGLE_CLIENT_SECRET"]
 });
 
 export type AppConfig = z.infer<typeof EnvironmentSchema>;

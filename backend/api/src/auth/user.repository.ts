@@ -9,7 +9,8 @@ interface UserRow {
   name: string;
   organisation: string;
   role: UserRole;
-  password_hash: string;
+  password_hash: string | null;
+  google_subject: string | null;
   is_active: boolean;
   last_login_at: Date | null;
   created_at: Date;
@@ -23,7 +24,10 @@ interface UserSummaryRow extends UserRow {
 }
 
 export interface StoredUser extends AuthUser {
-  passwordHash: string;
+  /** Null for an account that only signs in with Google. */
+  passwordHash: string | null;
+  /** The linked Google OpenID subject, or null when Google is not connected. */
+  googleSubject: string | null;
   isActive: boolean;
 }
 
@@ -32,7 +36,9 @@ export interface InsertUser {
   email: string;
   organisation: string;
   role: UserRole;
-  passwordHash: string;
+  /** Null only together with a googleSubject; the users_has_credential check enforces it. */
+  passwordHash: string | null;
+  googleSubject?: string | null;
   /** The administrator who provisioned this account; null for self sign-up. */
   createdBy?: string | null;
 }
@@ -63,7 +69,7 @@ export interface UserDeleteResult {
   user: StoredUser | null;
 }
 
-const columnList = ["id", "email", "name", "organisation", "role", "password_hash", "is_active", "last_login_at", "created_at"] as const;
+const columnList = ["id", "email", "name", "organisation", "role", "password_hash", "google_subject", "is_active", "last_login_at", "created_at"] as const;
 const columns = columnList.join(", ");
 const aliased = (alias: string) => columnList.map((column) => `${alias}.${column}`).join(", ");
 
@@ -85,14 +91,17 @@ function mapRow(row: UserRow): StoredUser {
     lastLoginAt: row.last_login_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     passwordHash: row.password_hash,
+    googleSubject: row.google_subject,
     isActive: row.is_active
   };
 }
 
 function mapSummary(row: UserSummaryRow): UserSummary {
-  const { passwordHash: _passwordHash, ...user } = mapRow(row);
+  // neither the hash nor the Google subject leaves the API; only whether each exists
+  const { passwordHash, googleSubject, ...user } = mapRow(row);
   return {
     ...user,
+    signInMethods: { password: passwordHash !== null, google: googleSubject !== null },
     createdByName: row.created_by_name,
     owns: {
       connections: row.owned_connections,
@@ -172,14 +181,46 @@ export class UserRepository {
 
   async insert(input: InsertUser): Promise<StoredUser> {
     const result = await this.database.query<UserRow>(
-      `INSERT INTO users (name, email, organisation, role, password_hash, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO users (name, email, organisation, role, password_hash, google_subject, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING ${columns}`,
-      [input.name, input.email, input.organisation, input.role, input.passwordHash, input.createdBy ?? null]
+      [input.name, input.email, input.organisation, input.role, input.passwordHash, input.googleSubject ?? null, input.createdBy ?? null]
     );
     const row = result.rows.at(0);
     if (!row) throw new Error("Creating the user returned no row");
     return mapRow(row);
+  }
+
+  async findByGoogleSubject(subject: string): Promise<StoredUser | null> {
+    const result = await this.database.query<UserRow>(`SELECT ${columns} FROM users WHERE google_subject = $1`, [subject]);
+    const row = result.rows.at(0);
+    return row ? mapRow(row) : null;
+  }
+
+  /**
+   * Connects a Google identity to an account that has none, or already has this
+   * one. False means a different Google identity was linked in the meantime; a
+   * subject already linked to another account surfaces as a 23505.
+   */
+  async linkGoogle(id: string, subject: string): Promise<boolean> {
+    const result = await this.database.query(
+      `UPDATE users SET google_subject = $2, updated_at = now()
+       WHERE id = $1 AND (google_subject IS NULL OR google_subject = $2)`,
+      [id, subject]
+    );
+    return Boolean(result.rowCount);
+  }
+
+  /**
+   * Disconnects Google, but only from an account that still has a password —
+   * checked in the same statement, so the account can never be left with no way in.
+   */
+  async unlinkGoogle(id: string): Promise<boolean> {
+    const result = await this.database.query(
+      "UPDATE users SET google_subject = NULL, updated_at = now() WHERE id = $1 AND password_hash IS NOT NULL",
+      [id]
+    );
+    return Boolean(result.rowCount);
   }
 
   async touchLastLogin(id: string): Promise<string | null> {

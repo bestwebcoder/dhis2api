@@ -287,6 +287,18 @@ export const SignInSchema = z.object({
 });
 export type SignInInput = z.infer<typeof SignInSchema>;
 
+/**
+ * The browser's half of a Google authorization-code exchange with PKCE. The
+ * code alone is useless without the verifier that only the tab which started
+ * the flow holds, and the API adds the client secret, which never leaves it.
+ */
+export const GoogleAuthSchema = z.object({
+  code: z.string().min(1).max(2048),
+  codeVerifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/, "Not a valid PKCE code verifier"),
+  redirectUri: z.url({ protocol: /^https?$/ }).max(2048)
+});
+export type GoogleAuthInput = z.infer<typeof GoogleAuthSchema>;
+
 export interface AuthUser {
   id: string;
   name: string;
@@ -309,6 +321,8 @@ export interface UserSummary extends AuthUser {
   createdByName: string | null;
   /** Control-plane objects this account created; what a deletion would orphan. */
   owns: OwnershipCounts;
+  /** Which credentials can open this account. At least one is always true. */
+  signInMethods: { password: boolean; google: boolean };
 }
 
 export interface OwnershipCounts {

@@ -1,8 +1,9 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { AuthService } from "./auth.service.js";
+import type { GoogleIdentity, GoogleOAuthService } from "./google-oauth.service.js";
 import { PasswordService } from "./password.service.js";
 import { TokenService } from "./token.service.js";
-import type { StoredUser, UserRepository } from "./user.repository.js";
+import type { InsertUser, StoredUser, UserRepository } from "./user.repository.js";
 
 // getConfig() is read lazily inside the service constructors, so the environment
 // only has to be in place before the first instantiation below.
@@ -21,21 +22,27 @@ const storedUser = (overrides: Partial<StoredUser> = {}): StoredUser => ({
   lastLoginAt: null,
   createdAt: "2026-09-01T00:00:00.000Z",
   passwordHash: "unset",
+  googleSubject: null,
   isActive: true,
   ...overrides
 });
 
-function harness(repository: Partial<UserRepository>) {
+const googleIdentity: GoogleIdentity = { subject: "109876543210987654321", email: "amina@ministry.gov", name: "Amina Yusuf" };
+const googleInput = { code: "4/0AbCdEf-one-time-code", codeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", redirectUri: "http://localhost:5173/" };
+
+function harness(repository: Partial<UserRepository>, identity: GoogleIdentity = googleIdentity) {
   const passwords = new PasswordService();
   const users = {
     countAll: async () => 1,
     findByEmail: async () => null,
     findById: async () => null,
+    findByGoogleSubject: async () => null,
     insert: async () => storedUser(),
     touchLastLogin: async () => "2026-09-12T00:00:00.000Z",
     ...repository
   } as UserRepository;
-  return { auth: new AuthService(users, passwords, new TokenService()), passwords };
+  const google = { exchange: async () => identity } as unknown as GoogleOAuthService;
+  return { auth: new AuthService(users, passwords, new TokenService(), google), passwords };
 }
 
 describe("password hashing", () => {
@@ -122,6 +129,62 @@ describe("sign in", () => {
     const passwordHash = await new PasswordService().hash("correct-horse");
     const { auth } = harness({ findByEmail: async () => storedUser({ passwordHash, isActive: false }) });
     await expect(auth.login({ email: "amina@ministry.gov", password: "correct-horse" })).rejects.toThrow(/deactivated/);
+  });
+});
+
+describe("Google sign-in", () => {
+  it("signs in the account already linked to that Google subject", async () => {
+    const insert = vi.fn(async () => storedUser());
+    const touchLastLogin = vi.fn(async () => "2026-09-15T08:00:00.000Z");
+    const { auth } = harness({
+      findByGoogleSubject: async (subject: string) => subject === googleIdentity.subject ? storedUser({ passwordHash: null, googleSubject: subject }) : null,
+      insert,
+      touchLastLogin
+    });
+    const session = await auth.signInWithGoogle(googleInput);
+    expect(new TokenService().verify(session.token).sub).toBe(session.user.id);
+    expect(session.user.lastLoginAt).toBe("2026-09-15T08:00:00.000Z");
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("refuses to attach Google to an existing account by matching the email alone", async () => {
+    const insert = vi.fn(async () => storedUser());
+    const { auth } = harness({ findByEmail: async () => storedUser(), insert });
+    await expect(auth.signInWithGoogle(googleInput)).rejects.toThrow(/connect Google from your profile/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("creates a password-less client account for a new Google identity", async () => {
+    const insert = vi.fn(async (input: InsertUser) => storedUser({ passwordHash: input.passwordHash, googleSubject: input.googleSubject ?? null }));
+    const { auth } = harness({ countAll: async () => 4, insert });
+    const session = await auth.signInWithGoogle(googleInput);
+    expect(insert.mock.calls.at(0)?.at(0)).toEqual({
+      name: "Amina Yusuf",
+      email: "amina@ministry.gov",
+      organisation: "Unassigned",
+      role: "client",
+      passwordHash: null,
+      googleSubject: googleIdentity.subject
+    });
+    // the Google subject is an internal link, never part of the session
+    expect(JSON.stringify(session)).not.toContain(googleIdentity.subject);
+  });
+
+  it("makes the first account an admin whichever way it signs up", async () => {
+    const insert = vi.fn(async (_input: InsertUser) => storedUser({ role: "admin" }));
+    const { auth } = harness({ countAll: async () => 0, insert });
+    await auth.signInWithGoogle(googleInput);
+    expect(insert.mock.calls.at(0)?.at(0)).toMatchObject({ role: "admin" });
+  });
+
+  it("refuses a deactivated account even when Google vouches for it", async () => {
+    const { auth } = harness({ findByGoogleSubject: async () => storedUser({ googleSubject: googleIdentity.subject, isActive: false }) });
+    await expect(auth.signInWithGoogle(googleInput)).rejects.toThrow(/deactivated/);
+  });
+
+  it("never lets a password open a Google-only account, and says so the same way as a wrong password", async () => {
+    const { auth } = harness({ findByEmail: async () => storedUser({ passwordHash: null, googleSubject: googleIdentity.subject }) });
+    await expect(auth.login({ email: "amina@ministry.gov", password: "anything-at-all" })).rejects.toThrow(/do not match an account/);
   });
 });
 
